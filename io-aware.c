@@ -4,9 +4,10 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
-#include <linux/uaccess.h>
 
 #include "io-aware.h"
+
+//////////// proc seq_file ////////////
 
 struct proc_dir_entry* proc_io_aware;
 
@@ -65,7 +66,7 @@ struct io_account_device* alloc_io_account_device(const char* name, int size) {
         return NULL;
     }
     strcpy(device->name, name);
-    device->table = alloc_io_account_table(size / IO_CHUNK_SIZE + 1);
+    device->table = alloc_io_account_table(GET_CHUNK_NUM(size));
     if (device->table == NULL) {
         goto r_device;
     }
@@ -73,7 +74,7 @@ struct io_account_device* alloc_io_account_device(const char* name, int size) {
     INIT_LIST_HEAD(&device->list);
     list_add_tail(&device->list, &io_account_device_list);
 
-    proc_create_seq_data(name, 0644, proc_io_aware, &io_aware_seq_ops, device);
+    proc_create_seq_data(name, 0444, proc_io_aware, &io_aware_seq_ops, device);
 
     return device;
 
@@ -124,7 +125,7 @@ EXPORT_SYMBOL(free_io_account_table);
 
 void io_account_inc(struct io_account_table* list, struct bio* bio) {
     struct io_account* account = list->account;
-    int i = DIV_ROUND_UP(bio->bi_iter.bi_sector, IO_CHUNK_SIZE);
+    int i = GET_CHUNK_INDEX(bio->bi_iter.bi_sector);
 
     if (bio_data_dir(bio) == READ) {
         atomic_inc(&account[i].read);

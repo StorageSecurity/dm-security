@@ -3,9 +3,12 @@
 
 #include <linux/atmioc.h>
 #include <linux/bio.h>
+#include <linux/kernel.h>
 #include <linux/list.h>
 
-#define IO_CHUNK_SIZE (4 * 1024 * 1024)
+#define IO_CHUNK_SIZE (1 * 1024 * 1024)
+#define GET_CHUNK_NUM(sector) (DIV_ROUND_UP(sector, IO_CHUNK_SIZE))
+#define GET_CHUNK_INDEX(sector) (sector / IO_CHUNK_SIZE)
 
 struct io_account {
     atomic_t read;

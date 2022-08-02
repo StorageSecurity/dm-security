@@ -43,9 +43,12 @@
 #include <linux/device-mapper.h>
 
 #include "dm-audit.h"
+#include "hot-cold-region.h"
 #include "io-aware.h"
 
 #define DM_MSG_PREFIX "security"
+
+/////////////// extern interfaces in io-aware.h ///////////////
 
 extern struct io_account_device* alloc_io_account_device(const char* name,
                                                          int size);
@@ -54,6 +57,27 @@ extern void free_io_account_device(struct io_account_device* device);
 extern struct io_account_table* alloc_io_account_table(int size);
 extern void free_io_account_table(struct io_account_table* table);
 extern void io_account_inc(struct io_account_table* list, struct bio* bio);
+
+///////////// extern interfaces in hot-cold-region.h ///////////////
+
+extern struct global_region_map* alloc_region_map(unsigned long size);
+extern void free_region_map(struct global_region_map* map);
+extern void region_map_set(struct global_region_map* map,
+                           unsigned long index,
+                           unsigned long value);
+extern unsigned long region_map_get(struct global_region_map* map,
+                                    unsigned long index);
+
+extern struct region_translation_layer* alloc_region_translation_layer(
+    const char* devname,
+    int size);
+extern void free_region_translation_layer(struct region_translation_layer* rtl);
+
+extern struct device_region* alloc_device_region(unsigned long start,
+                                                 unsigned long size);
+extern void free_device_region(struct device_region* region);
+
+//////////// dm-security codes //////////////
 
 /*
  * context holding the current state of a multi-part conversion
@@ -166,6 +190,7 @@ struct crypt_config {
     sector_t start;
 
     struct io_account_table* account_table;
+    struct region_translation_layer* rtl;
 
     struct percpu_counter n_allocated_pages;
 
@@ -3282,12 +3307,22 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
         goto bad;
     }
 
+    /////////////////// allocate io_account_device ///////////////////
+
     account_device = alloc_io_account_device(devname, ti->len);
     if (!account_device) {
         ti->error = "Cannot allocate io account device";
         goto bad;
     }
     cc->account_table = account_device->table;
+
+    /////////////////// allocate region_translation_layer ///////////////////
+
+    cc->rtl = alloc_region_translation_layer(devname, ti->len);
+    if (!cc->rtl) {
+        ti->error = "Cannot allocate region translation layer";
+        goto bad;
+    }
 
     ret = -EINVAL;
     if (sscanf(argv[4], "%llu%c", &tmpll, &dummy) != 1 ||
@@ -3443,6 +3478,7 @@ static int crypt_map(struct dm_target* ti, struct bio* bio) {
     else
         io->ctx.r.req = (struct skcipher_request*)(io + 1);
 
+    ///////////////// account io //////////////////
     io_account_inc(cc->account_table, io->base_bio);
 
     if (bio_data_dir(io->base_bio) == READ) {
