@@ -17,6 +17,7 @@ minor = 0
 # load BPF program
 b = BPF(src_file="submit_bio.c", cflags=["-DDEV_MAJOR=%d" % major, "-DDEV_MINOR=%d" % minor])
 b.attach_kprobe(event="__submit_bio", fn_name="bio_account_fn")
+b.attach_kretprobe(event="table_load", fn_name="table_load_ret_fn")
 
 b["bio_account_ring"].open_ring_buffer(callback)
 
