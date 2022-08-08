@@ -17,6 +17,11 @@
      REGION_SIZE_READ_HOT_WRITE_COLD(chknum) -         \
      REGION_SIZE_READ_COLD_WRITE_HOT(chknum))
 
+#define IO_REGION_MAPPED 0
+#define IO_REGION_UNMAPPED 1
+#define IO_REGION_REMAPPED 2
+#define region_map_result int
+
 struct device_region;
 struct region_translation_layer;
 struct global_region_map;
@@ -31,11 +36,12 @@ struct device_region {
     unsigned long start;
     unsigned long size;
     unsigned long in_use;
+    unsigned long* map;
 };
 
 struct global_region_map {
     unsigned long size;
-    unsigned long* bitmap;
+    unsigned long* map;
 };
 
 struct global_region_map* alloc_region_map(unsigned long size);
@@ -54,5 +60,10 @@ void free_region_translation_layer(struct region_translation_layer* rtl);
 struct device_region* alloc_device_region(unsigned long start,
                                           unsigned long size);
 void free_device_region(struct device_region* region);
+
+region_map_result io_region_map(struct region_translation_layer* rtl,
+                   struct bio* bio,
+                   rw_mode mode);
+int io_region_alloc_chunk(struct region_translation_layer* rtl, rw_mode mode);
 
 #endif

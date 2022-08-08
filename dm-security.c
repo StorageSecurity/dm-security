@@ -57,6 +57,8 @@ extern void free_io_account_device(struct io_account_device* device);
 extern struct io_account_table* alloc_io_account_table(int size);
 extern void free_io_account_table(struct io_account_table* table);
 extern void io_account_inc(struct io_account_table* list, struct bio* bio);
+extern rw_mode io_read_write_mode(struct io_account_table* list,
+                                  struct bio* bio);
 
 ///////////// extern interfaces in hot-cold-region.h ///////////////
 
@@ -76,6 +78,11 @@ extern void free_region_translation_layer(struct region_translation_layer* rtl);
 extern struct device_region* alloc_device_region(unsigned long start,
                                                  unsigned long size);
 extern void free_device_region(struct device_region* region);
+extern region_map_result io_region_map(struct region_translation_layer* rtl,
+                                       struct bio* bio,
+                                       rw_mode mode);
+extern int io_region_alloc_chunk(struct region_translation_layer* rtl,
+                                 rw_mode mode);
 
 //////////// dm-security codes //////////////
 
@@ -1876,6 +1883,13 @@ static void clone_init(struct dm_crypt_io* io, struct bio* clone) {
     clone->bi_opf = io->base_bio->bi_opf;
 }
 
+static int kcryptd_io_read_map(struct crypt_config* cc, struct bio* bio) {
+    rw_mode mode = io_read_write_mode(clone);
+    region_map_result map_res = io_region_map(cc->rtl, clone, mode);
+
+    
+}
+
 static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
     struct crypt_config* cc = io->cc;
     struct bio* clone;
@@ -1899,6 +1913,10 @@ static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
         crypt_dec_pending(io);
         bio_put(clone);
         return 1;
+    }
+
+    if (kcryptd_io_read_map(cc, clone)) {
+        // TODO: handle error
     }
 
     submit_bio_noacct(clone);

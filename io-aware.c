@@ -123,6 +123,12 @@ void free_io_account_table(struct io_account_table* list) {
 }
 EXPORT_SYMBOL(free_io_account_table);
 
+/**
+ * @brief bio account
+ *
+ * @param list
+ * @param bio
+ */
 void io_account_inc(struct io_account_table* list, struct bio* bio) {
     struct io_account* account = list->account;
     int i = GET_CHUNK_INDEX(bio->bi_iter.bi_sector);
@@ -134,6 +140,26 @@ void io_account_inc(struct io_account_table* list, struct bio* bio) {
     }
 }
 EXPORT_SYMBOL(io_account_inc);
+
+rw_mode io_read_write_mode(struct io_account_table* list, struct bio* bio) {
+    struct io_account* account = list->account;
+    int i = GET_CHUNK_INDEX(bio->bi_iter.bi_sector);
+    int read = atomic_read(&account[i].read);
+    int write = atomic_read(&account[i].write);
+
+    if (read >= write * 10) {
+        return RW_MODE_RHWC;
+    }
+    if (write >= read * 10) {
+        return RW_MODE_RCWH;
+    }
+    if (read > 100 && write > 100) {
+        return RW_MODE_RHWH;
+    } else {
+        return RW_MODE_RCWC;
+    }
+}
+EXPORT_SYMBOL(io_read_write_mode);
 
 static int __init io_aware_init(void) {
     proc_io_aware = proc_mkdir("io-aware", NULL);

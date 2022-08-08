@@ -250,6 +250,44 @@ void free_device_region(struct device_region* region) {
 }
 EXPORT_SYMBOL(free_device_region);
 
+region_map_result io_region_map(struct region_translation_layer* rtl,
+                   struct bio* bio,
+                   rw_mode mode) {
+    int i;
+    int chunk_index = GET_CHUNK_INDEX(bio->bi_iter.bi_sector);
+    int offset = GET_OFFSET_IN_CHUNK(bio->bi_iter.bi_sector);
+    int mapped_chunk = region_map_get(rtl->map, mapped_chunk);
+    struct device_region* region = rtl->region[mode];
+
+    if (mapped_chunk == -1) {
+        return IO_REGION_UNMAPPED;
+    }
+
+    bio->bi_iter.bi_sector = mapped_chunk * IO_CHUNK_SIZE + offset;
+    for (i = 0; i < region->size; i++) {
+        if (region->map[i] == chunk_index) {
+            return IO_REGION_MAPPED;
+        }
+    }
+    return IO_REGION_REMAPPED;
+}
+EXPORT_SYMBOL(io_region_map);
+
+int io_region_alloc_chunk(struct region_translation_layer* rtl, rw_mode mode) {
+    struct device_region* region = rtl->region[mode];
+    int i;
+    if (region->in_use == region->size) {
+        return -1;
+    }
+    for (i = region->start; i < region->size; i++) {
+        if (region->map[i] == 0) {
+            break;
+        }
+    }
+    return i;
+}
+EXPORT_SYMBOL(io_region_alloc);
+
 static int __init hot_cold_region_init(void) {
     pr_info("hot_cold_region_init\n");
     proc_hot_cold_region = proc_mkdir("hot-cold-region", NULL);
