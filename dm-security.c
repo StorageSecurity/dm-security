@@ -21,7 +21,6 @@
 #include <linux/atomic.h>
 #include <linux/backing-dev.h>
 #include <linux/bio.h>
-#include <linux/blk-integrity.h>
 #include <linux/blkdev.h>
 #include <linux/completion.h>
 #include <linux/crypto.h>
@@ -42,42 +41,7 @@
 
 #include <linux/device-mapper.h>
 
-#include "dm-audit.h"
-#include "hot-cold-region.h"
-#include "io-aware.h"
-
 #define DM_MSG_PREFIX "security"
-
-/////////////// extern interfaces in io-aware.h ///////////////
-
-extern struct io_account_device* alloc_io_account_device(const char* name,
-                                                         int size);
-extern void free_io_account_device(struct io_account_device* device);
-
-extern struct io_account_table* alloc_io_account_table(int size);
-extern void free_io_account_table(struct io_account_table* table);
-extern void io_account_inc(struct io_account_table* list, struct bio* bio);
-
-///////////// extern interfaces in hot-cold-region.h ///////////////
-
-extern struct global_region_map* alloc_region_map(unsigned long size);
-extern void free_region_map(struct global_region_map* map);
-extern void region_map_set(struct global_region_map* map,
-                           unsigned long index,
-                           unsigned long value);
-extern unsigned long region_map_get(struct global_region_map* map,
-                                    unsigned long index);
-
-extern struct region_translation_layer* alloc_region_translation_layer(
-    const char* devname,
-    int size);
-extern void free_region_translation_layer(struct region_translation_layer* rtl);
-
-extern struct device_region* alloc_device_region(unsigned long start,
-                                                 unsigned long size);
-extern void free_device_region(struct device_region* region);
-
-//////////// dm-security codes //////////////
 
 /*
  * context holding the current state of a multi-part conversion
@@ -188,9 +152,6 @@ enum cipher_flags {
 struct crypt_config {
     struct dm_dev* dev;
     sector_t start;
-
-    struct io_account_table* account_table;
-    struct region_translation_layer* rtl;
 
     struct percpu_counter n_allocated_pages;
 
@@ -1409,11 +1370,9 @@ static int crypt_convert_block_aead(struct crypt_config* cc,
 
     if (r == -EBADMSG) {
         char b[BDEVNAME_SIZE];
-        sector_t s = le64_to_cpu(*sector);
-
         DMERR_LIMIT("%s: INTEGRITY AEAD ERROR, sector %llu",
-                    bio_devname(ctx->bio_in, b), s);
-        dm_audit_log_bio(DM_MSG_PREFIX, "integrity-aead", ctx->bio_in, s, 0);
+                    bio_devname(ctx->bio_in, b),
+                    (unsigned long long)le64_to_cpu(*sector));
     }
 
     if (!r && cc->iv_gen_ops && cc->iv_gen_ops->post)
@@ -2204,11 +2163,10 @@ static void kcryptd_async_done(struct crypto_async_request* async_req,
 
     if (error == -EBADMSG) {
         char b[BDEVNAME_SIZE];
-        sector_t s = le64_to_cpu(*org_sector_of_dmreq(cc, dmreq));
-
-        DMERR_LIMIT("%s: INTEGRITY AEAD ERROR, sector %llu",
-                    bio_devname(ctx->bio_in, b), s);
-        dm_audit_log_bio(DM_MSG_PREFIX, "integrity-aead", ctx->bio_in, s, 0);
+        DMERR_LIMIT(
+            "%s: INTEGRITY AEAD ERROR, sector %llu",
+            bio_devname(ctx->bio_in, b),
+            (unsigned long long)le64_to_cpu(*org_sector_of_dmreq(cc, dmreq)));
         io->error = BLK_STS_PROTECTION;
     } else if (error < 0)
         io->error = BLK_STS_IOERR;
@@ -2753,8 +2711,6 @@ static void crypt_dtr(struct dm_target* ti) {
     dm_crypt_clients_n--;
     crypt_calculate_pages_per_client();
     spin_unlock(&dm_crypt_clients_lock);
-
-    dm_audit_log_dtr(DM_MSG_PREFIX, ti, 1);
 }
 
 static int crypt_ctr_ivmode(struct dm_target* ti, const char* ivmode) {
@@ -3192,7 +3148,6 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
     int ret;
     size_t iv_size_padding, additional_req_size;
     char dummy;
-    struct io_account_device* account_device;
 
     if (argc < 5) {
         ti->error = "Not enough arguments";
@@ -3307,23 +3262,6 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
         goto bad;
     }
 
-    /////////////////// allocate io_account_device ///////////////////
-
-    account_device = alloc_io_account_device(devname, ti->len);
-    if (!account_device) {
-        ti->error = "Cannot allocate io account device";
-        goto bad;
-    }
-    cc->account_table = account_device->table;
-
-    /////////////////// allocate region_translation_layer ///////////////////
-
-    cc->rtl = alloc_region_translation_layer(devname, ti->len);
-    if (!cc->rtl) {
-        ti->error = "Cannot allocate region translation layer";
-        goto bad;
-    }
-
     ret = -EINVAL;
     if (sscanf(argv[4], "%llu%c", &tmpll, &dummy) != 1 ||
         tmpll != (sector_t)tmpll) {
@@ -3399,22 +3337,21 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
     cc->write_tree = RB_ROOT;
 
     cc->write_thread =
-        kthread_run(dmcrypt_write, cc, "dmcrypt_write/%s", devname);
+        kthread_create(dmcrypt_write, cc, "dmcrypt_write/%s", devname);
     if (IS_ERR(cc->write_thread)) {
         ret = PTR_ERR(cc->write_thread);
         cc->write_thread = NULL;
         ti->error = "Couldn't spawn write thread";
         goto bad;
     }
+    wake_up_process(cc->write_thread);
 
     ti->num_flush_bios = 1;
     ti->limit_swap_bios = true;
 
-    dm_audit_log_ctr(DM_MSG_PREFIX, ti, 1);
     return 0;
 
 bad:
-    dm_audit_log_ctr(DM_MSG_PREFIX, ti, 0);
     crypt_dtr(ti);
     return ret;
 }
@@ -3477,9 +3414,6 @@ static int crypt_map(struct dm_target* ti, struct bio* bio) {
         io->ctx.r.req_aead = (struct aead_request*)(io + 1);
     else
         io->ctx.r.req = (struct skcipher_request*)(io + 1);
-
-    ///////////////// account io //////////////////
-    io_account_inc(cc->account_table, io->base_bio);
 
     if (bio_data_dir(io->base_bio) == READ) {
         if (kcryptd_io_read(io, GFP_NOWAIT))
@@ -3701,7 +3635,7 @@ static struct target_type crypt_target = {
     .io_hints = crypt_io_hints,
 };
 
-static int __init dm_crypt_init(void) {
+static int __init dm_security_init(void) {
     int r;
 
     r = dm_register_target(&crypt_target);
@@ -3711,12 +3645,12 @@ static int __init dm_crypt_init(void) {
     return r;
 }
 
-static void __exit dm_crypt_exit(void) {
+static void __exit dm_security_exit(void) {
     dm_unregister_target(&crypt_target);
 }
 
-module_init(dm_crypt_init);
-module_exit(dm_crypt_exit);
+module_init(dm_security_init);
+module_exit(dm_security_exit);
 
 MODULE_AUTHOR("Jana Saout <jana@saout.de>");
 MODULE_DESCRIPTION(DM_NAME " target for transparent encryption / decryption");
