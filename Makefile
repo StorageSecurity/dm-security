@@ -1,4 +1,4 @@
-obj-m += dm-security.o
+obj-m += dm-security.o region-mapper.o
 
 KDIR = /lib/modules/$(shell uname -r)/build
 

@@ -41,7 +41,7 @@
 
 #include <linux/device-mapper.h>
 // for test in linux-5.17.*
-// #include "blk-integrity.h"
+#include "blk-integrity.h"
 
 #define DM_MSG_PREFIX "security"
 

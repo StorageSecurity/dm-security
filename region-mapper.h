@@ -1,7 +1,7 @@
 #ifndef __REGION_MAPPER_H
 #define __REGION_MAPPER_H
 
-#include <sys/types.h>
+#include <linux/types.h>
 
 #define CHUNK_SIZE (4 * 1024 * 1024)  // 1MB
 #define CHUNK_SHIFT (22)
@@ -18,13 +18,13 @@ struct dev_id;
 struct mapping_table;
 struct dev_region_mapper;
 
-static struct list_head get_all_devices(void);
+struct list_head get_all_devices(void);
 
-static struct dev_region_mapper* dev_create_region_mapper(char* name,
-                                                          dev_t dev,
-                                                          sector_t sectors);
+struct dev_region_mapper* dev_create_region_mapper(char* name,
+                                                   dev_t dev,
+                                                   sector_t sectors);
 
-static struct mapping_table* alloc_mapping_table(sector_t sectors);
-static void free_mapping_table(struct mapping_table* tbl);
+struct mapping_table* alloc_mapping_table(sector_t sectors);
+void free_mapping_table(struct mapping_table* tbl);
 
 #endif

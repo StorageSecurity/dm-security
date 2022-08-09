@@ -8,6 +8,7 @@
 #include <linux/proc_fs.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/vmalloc.h>
 
 struct dev_id {
     struct list_head list;
@@ -65,7 +66,7 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Region mapper");
 MODULE_VERSION("0.1");
 
-static init __init region_mapper_init(void) {
+static int __init region_mapper_init(void) {
     pr_info("region_mapper_init\n");
     proc_region_mapper = proc_mkdir(PROC_REGION_MAPPER_DIR, NULL);
     if (proc_region_mapper == NULL) {
@@ -152,12 +153,12 @@ static ssize_t region_mapper_write_proc(struct file* filp,
 
 /* Export Symbols*/
 
-static struct list_head get_all_devices(void) {
+struct list_head get_all_devices(void) {
     return all_devices;
 }
 EXPORT_SYMBOL(get_all_devices);
 
-static struct mapping_table* alloc_mapping_table(sector_t sectors) {
+struct mapping_table* alloc_mapping_table(sector_t sectors) {
     struct mapping_table* tbl =
         kmalloc(sizeof(struct mapping_table), GFP_KERNEL);
 
@@ -174,16 +175,16 @@ static struct mapping_table* alloc_mapping_table(sector_t sectors) {
 }
 EXPORT_SYMBOL(alloc_mapping_table);
 
-static void free_mapping_table(struct mapping_table* tbl) {
+void free_mapping_table(struct mapping_table* tbl) {
     kfree(tbl->bitmap);
     vfree(tbl->mapping_page);
     kfree(tbl);
 }
 EXPORT_SYMBOL(free_mapping_table);
 
-static struct dev_region_mapper* dev_create_region_mapper(char* name,
-                                                          dev_t dev,
-                                                          sector_t sectors) {
+struct dev_region_mapper* dev_create_region_mapper(char* name,
+                                                   dev_t dev,
+                                                   sector_t sectors) {
     struct dev_id* dev_id = kmalloc(sizeof(struct dev_id), GFP_KERNEL);
     struct dev_region_mapper* mapper =
         kmalloc(sizeof(struct dev_region_mapper), GFP_KERNEL);
@@ -201,7 +202,7 @@ static struct dev_region_mapper* dev_create_region_mapper(char* name,
     dev_id->major = MAJOR(dev);
     dev_id->minor = MINOR(dev);
     mapper->dev = dev_id;
-    mapper->mapping_table = tbl;
+    mapper->mapping_tbl = tbl;
     list_add(&dev_id->list, &all_devices);
 
     sprintf(proc_dev, "%d:%d", MAJOR(dev), MINOR(dev));
