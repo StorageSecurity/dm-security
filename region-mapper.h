@@ -3,16 +3,32 @@
 
 #include <linux/types.h>
 
-#define CHUNK_SIZE (4 * 1024 * 1024)  // 1MB
+#define CHUNK_SIZE (8 * 1024 * 1024)  // 8MB
 #define CHUNK_SHIFT (22)
-#define EXPECT_RDWR_SHIFT (30)
-#define CURRENT_RDWR_SHIFT (28)
+#define SECTOR_TO_CHUNK(sector) ((sector) >> CHUNK_SHIFT)
+
 #define REGION_TYPE_MASK (0x3)
+
+#define EXPECT_RDWR_SHIFT (30)
+#define EXPECT_RDWR_TYPE(entry) \
+    (((entry) >> EXPECT_RDWR_SHIFT) & REGION_TYPE_MASK)
+
+#define CURRENT_RDWR_SHIFT (28)
+#define CURRENT_RDWR_TYPE(entry) \
+    (((entry) >> CURRENT_RDWR_SHIFT) & REGION_TYPE_MASK)
+
 #define REGION_READ_BIT(mask) ((mask)&0x2)
 #define REGION_WRITE_BIT(mask) ((mask)&0x1)
 #define EXPECT_RDWR_CLEAR_THEN_SET(entry, type)               \
     (((~(REGION_TYPE_MASK << EXPECT_RDWR_SHIFT)) & (entry)) | \
      ((type) << EXPECT_RDWR_SHIFT))
+
+#define MAPPING_ENTRY_IN_USE_SHIFT (27)
+#define MAPPING_ENTRY_IN_USE(entry) \
+    ((entry) & (1 << MAPPING_ENTRY_IN_USE_SHIFT))
+
+#define TARGET_CHUNK_MASK (0x7FFFFFF)
+#define TARGET_CHUNK(entry) ((entry)&TARGET_CHUNK_MASK)
 
 struct dev_id;
 struct mapping_table;
@@ -22,9 +38,24 @@ struct list_head get_all_devices(void);
 
 struct dev_region_mapper* dev_create_region_mapper(char* name,
                                                    dev_t dev,
+                                                   sector_t start,
                                                    sector_t sectors);
+void dev_destroy_region_mapper(struct dev_region_mapper* mapper);
 
 struct mapping_table* alloc_mapping_table(sector_t sectors);
 void free_mapping_table(struct mapping_table* tbl);
+unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors);
+int alloc_new_mapping_entry(struct mapping_table* tbl);
+
+void bio_region_map(struct dev_region_mapper* mapper, struct bio* bio);
+inline void __bio_region_map(struct dev_region_mapper* mapper,
+                             struct bio* bio,
+                             unsigned int entry);
+void bio_read_region_map(struct dev_region_mapper* mapper,
+                         struct bio* bio,
+                         unsigned int entry);
+void bio_write_region_map(struct dev_region_mapper* mapper,
+                          struct bio* bio,
+                          unsigned int entry);
 
 #endif

@@ -40,10 +40,17 @@
 #include <linux/workqueue.h>
 
 #include <linux/device-mapper.h>
+#include "region-mapper.h"
 // for test in linux-5.17.*
 #include "blk-integrity.h"
 
 #define DM_MSG_PREFIX "security"
+
+/* extern interfaces in region-mapper module */
+struct dev_region_mapper* dev_create_region_mapper(char* name,
+                                                   dev_t dev,
+                                                   sector_t start,
+                                                   sector_t sectors);
 
 /*
  * context holding the current state of a multi-part conversion
@@ -154,6 +161,8 @@ enum cipher_flags {
 struct crypt_config {
     struct dm_dev* dev;
     sector_t start;
+
+    struct dev_region_mapper* rmap;
 
     struct percpu_counter n_allocated_pages;
 
@@ -1862,6 +1871,9 @@ static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
         return 1;
     }
 
+    // map bio using regrion mapper
+    bio_region_map(cc->rmap, clone);
+
     submit_bio_noacct(clone);
     return 0;
 }
@@ -2713,6 +2725,8 @@ static void crypt_dtr(struct dm_target* ti) {
     dm_crypt_clients_n--;
     crypt_calculate_pages_per_client();
     spin_unlock(&dm_crypt_clients_lock);
+
+    dev_destroy_region_mapper(cc->rmap);
 }
 
 static int crypt_ctr_ivmode(struct dm_target* ti, const char* ivmode) {
@@ -3150,6 +3164,7 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
     int ret;
     size_t iv_size_padding, additional_req_size;
     char dummy;
+    struct dev_region_mapper* dev_reg_mapper;
 
     if (argc < 5) {
         ti->error = "Not enough arguments";
@@ -3263,6 +3278,15 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
         ti->error = "Device lookup failed";
         goto bad;
     }
+
+    // create dev_region_mapper
+    dev_reg_mapper =
+        dev_create_region_mapper(devname, cc->dev->bdev->bd_dev, ti->len);
+    if (!dev_reg_mapper) {
+        ti->error = "Cannot create region mapper";
+        goto bad;
+    }
+    cc->rmap = dev_reg_mapper;
 
     ret = -EINVAL;
     if (sscanf(argv[4], "%llu%c", &tmpll, &dummy) != 1 ||

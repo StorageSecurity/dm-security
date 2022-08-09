@@ -1,5 +1,6 @@
 #include "region-mapper.h"
 #include <asm/page_types.h>
+#include <linux/blk_types.h>
 #include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -19,20 +20,23 @@ struct dev_id {
 LIST_HEAD(all_devices);
 
 struct mapping_table {
-    int entry_count;
-    // indicate whether the mapping table entry in use
-    int* bitmap;
+    unsigned int entry_count;
+    // indicate whether the target chunk in use
+    // bitmap line start from less significant bit to most significant bit
+    unsigned int* bitmap;
     // dynamic allocating page to hold mapping entries,
     // maybe a memory page size (4KB) or partial.
     // each entry is a 32 bit integer, something like:
-    // |----------+----------+------------------|
-    // | exp_rw:2 | cur_rw:2 | target region:28 |
-    // |----------+----------+------------------|
-    int* mapping_page;
+    // |----------+----------+----------+-----------------|
+    // | exp_rw:2 | cur_rw:2 | in_use:1 |target region:28 |
+    // |----------+----------+----------+-----------------|
+    unsigned int* mapping_page;
 };
 
 struct dev_region_mapper {
     struct dev_id* dev;
+    sector_t start;  // device start sector
+    sector_t len;    // device length in sectors
     struct mapping_table* mapping_tbl;
 };
 
@@ -98,8 +102,9 @@ static ssize_t region_mapper_read_proc(struct file* filp,
                                        size_t count,
                                        loff_t* offset) {
     ssize_t ret = 0;
-    int** mapping_entry = pde_data(file_inode(filp));
-    int rw_flags = ((**mapping_entry) >> CURRENT_RDWR_SHIFT) & REGION_TYPE_MASK;
+    unsigned** mapping_entry = pde_data(file_inode(filp));
+    unsigned rw_flags =
+        ((**mapping_entry) >> CURRENT_RDWR_SHIFT) & REGION_TYPE_MASK;
     char out[3];
     pr_info("region_mapper_read_proc\n");
 
@@ -120,9 +125,9 @@ static ssize_t region_mapper_write_proc(struct file* filp,
                                         const char* buf,
                                         size_t count,
                                         loff_t* offset) {
-    int** mapping_entry = pde_data(file_inode(filp));
+    unsigned int** mapping_entry = pde_data(file_inode(filp));
     char in[3];
-    int rw_flags = 0;
+    unsigned int rw_flags = 0;
     pr_info("region_mapper_write_proc\n");
 
     if (copy_from_user(in, buf, count)) {
@@ -168,8 +173,10 @@ struct mapping_table* alloc_mapping_table(sector_t sectors) {
     }
 
     tbl->entry_count = (sectors << SECTOR_SHIFT) >> CHUNK_SHIFT;
-    tbl->bitmap = kzalloc(tbl->entry_count >> sizeof(int), GFP_KERNEL);
-    tbl->mapping_page = vmalloc(tbl->entry_count << sizeof(int));
+    tbl->mapping_page = vmalloc(tbl->entry_count << sizeof(unsigned int));
+    tbl->bitmap = kzalloc(tbl->entry_count >> sizeof(unsigned int), GFP_KERNEL);
+    // reserve the first target chunk for unmapped read io
+    tbl->bitmap[0] = 0x1;
 
     return tbl;
 }
@@ -184,6 +191,7 @@ EXPORT_SYMBOL(free_mapping_table);
 
 struct dev_region_mapper* dev_create_region_mapper(char* name,
                                                    dev_t dev,
+                                                   sector_t start,
                                                    sector_t sectors) {
     struct dev_id* dev_id = kmalloc(sizeof(struct dev_id), GFP_KERNEL);
     struct dev_region_mapper* mapper =
@@ -204,6 +212,8 @@ struct dev_region_mapper* dev_create_region_mapper(char* name,
     mapper->dev = dev_id;
     mapper->mapping_tbl = tbl;
     list_add(&dev_id->list, &all_devices);
+    mapper->start = start;
+    mapper->len = sectors;
 
     sprintf(proc_dev, "%d:%d", MAJOR(dev), MINOR(dev));
     entry = proc_mkdir(proc_dev, proc_region_mapper);
@@ -225,3 +235,107 @@ err:
     return NULL;
 }
 EXPORT_SYMBOL(dev_create_region_mapper);
+
+void dev_destroy_region_mapper(struct dev_region_mapper* mapper) {
+    struct dev_id* dev_id = mapper->dev;
+    struct mapping_table* tbl = mapper->mapping_tbl;
+    char proc_dev[16];
+    int i;
+    sprintf(proc_dev, "%d:%d", dev_id->major, dev_id->minor);
+    list_del(&dev_id->list);
+    kfree(dev_id);
+    for (i = 0; i < tbl->entry_count; i++) {
+        char proc_chk[16];
+        sprintf(proc_chk, "%d", i);
+        remove_proc_entry(proc_chk, proc_region_mapper);
+    }
+    remove_proc_entry(proc_dev, proc_region_mapper);
+    free_mapping_table(tbl);
+    kfree(mapper);
+}
+EXPORT_SYMBOL(dev_destroy_region_mapper);
+
+unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors) {
+    int logical_chunk = SECTOR_TO_CHUNK(sectors);
+
+    if (logical_chunk >= tbl->entry_count) {
+        pr_err("region_mapper: logical chunk '%d' out of range\n",
+               logical_chunk);
+        return 0;
+    }
+
+    if (!MAPPING_ENTRY_IN_USE(tbl->mapping_page[logical_chunk])) {
+        pr_err("region_mapper: invalid mapping entry\n");
+        return 0;
+    }
+    return tbl->mapping_page[logical_chunk];
+}
+EXPORT_SYMBOL(get_mapping_entry);
+
+int alloc_new_mapping_entry(struct mapping_table* tbl) {
+    int i, j;
+
+    // quickly find out not fully allocated bitmap line
+    for (i = 0; i < tbl->entry_count; i++) {
+        if (tbl->bitmap[i] != 0xFFFFFFFF) {
+            break;
+        }
+    }
+
+    // find out the exact not allocated bit in the bitmap line
+    for (j = 0; j < sizeof(unsigned int) * 8; j++) {
+        if (!(tbl->bitmap[i] & (1 << j))) {
+            tbl->bitmap[i] |= (1 << j);
+            return i * sizeof(unsigned int) * 8 + j;
+        }
+    }
+    return -1;
+}
+EXPORT_SYMBOL(alloc_new_mapping_entry);
+
+/* BIO map functions */
+
+void bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
+    unsigned int expect_type;
+    unsigned int current_type;
+    struct mapping_table* tbl = mapper->mapping_tbl;
+    sector_t sectors = bio->bi_iter->bi_sector - mapper->start;
+    unsigned int entry = get_mapping_entry(tbl, sectors);
+
+    if (entry) {
+        expect_type = EXPECT_RDWR_TYPE(entry);
+        current_type = CURRENT_TYPE(entry);
+        pr_info("region_mapper: expect type %d, current type %d\n", expect_type,
+                current_type);
+        if (expect_type == current_type) {
+            __bio_region_map(mapper, bio, entry);
+            return;
+        }
+    }
+
+    if (bio_data_dir(bio) == READ) {
+        if (!entry) {
+            __bio_region_map(mapper, bio, entry);
+            return;
+        }
+        bio_read_region_map(mapper, bio);
+    } else {
+        bio_write_region_map(mapper, bio);
+    }
+}
+EXPORT_SYMBOL(bio_region_map);
+
+inline void __bio_region_map(struct dev_region_mapper* mapper,
+                             struct bio* bio,
+                             unsigned int entry) {
+    bio->bi_iter->bi_sector = TARGET_CHUNK(entry) * CHUNK_SIZE + mapper->start;
+}
+
+void bio_read_region_map(struct dev_region_mapper* mapper, struct bio* bio, unsigned int entry) {
+
+}
+
+void bio_write_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
+
+}
+
