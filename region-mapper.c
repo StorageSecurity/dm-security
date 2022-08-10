@@ -464,23 +464,30 @@ bool check_sectors_synced(struct sync_table* stbl,
     unsigned int i = start / sizeof(int) * 8;
     unsigned int j = start % sizeof(int) * 8;
 
-    // if (sectors + j <= sizeof(int) * 8) {
-    //     if (stbl->bitmap[i] & ((1 << sectors) - 1) << j) {
-    //         return true;
-    //     }
-    // } else {
-    //     if (stbl->bitmap[i] & ((1 << (sizeof(int) * 8 - j)) - 1)) {
-    //         return true;
-    //     }
-    //     if (stbl->bitmap[i + 1] &
-    //         ((1 << (sectors - (sizeof(int) * 8 - j))) - 1)) {
-    //         return true;
-    //     }
-    // }
+    if (sectors + j <= sizeof(int) * 8) {
+        return ((stbl->bitmap[i] >> j) & ((1 << sectors) - 1)) ==
+               ((1 << sectors) - 1);
+    } else {
+        if ((stbl->bitmap[i] >> j) != (1 << (sizeof(int) * 8 - j))) {
+            return false;
+        }
+        sectors -= sizeof(int) * 8 - j;
+    }
 
-    // if (~(stbl->bitmap[i] & ((1 << (j + 1)) - 1))) {
-    //     return false;
-    // }
+    while (sectors > 0) {
+        i++;
+        if (sectors >= sizeof(int) * 8) {
+            if (~(stbl->bitmap[i])) {
+                return false;
+            }
+            sectors -= sizeof(int) * 8;
+        } else {
+            return (stbl->bitmap[i] & ((1 << sectors) - 1)) ==
+                   ((1 << sectors) - 1)
+        }
+    }
+
+    return true;
 }
 /* BIO map functions */
 
@@ -501,14 +508,10 @@ struct bio* bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
         }
     }
 
-    if (bio_data_dir(bio) == READ) {
-        if (!entry) {
-            return __bio_region_map(mapper, bio, entry);
-        }
-        return bio_read_region_map(mapper, bio, entry);
-    } else {
-        return bio_write_region_map(mapper, bio, entry);
+    if (bio_data_dir(bio) == READ && !entry) {
+        return __bio_region_map(mapper, bio, entry);
     }
+    return bio_region_map_sync(mapper, bio, entry);
 }
 EXPORT_SYMBOL(bio_region_map);
 
@@ -519,7 +522,7 @@ inline struct bio* __bio_region_map(struct dev_region_mapper* mapper,
     return NULL;
 }
 
-struct bio* bio_read_region_map(struct dev_region_mapper* mapper,
+struct bio* bio_region_map_sync(struct dev_region_mapper* mapper,
                                 struct bio* bio,
                                 unsigned int entry) {
     int logical_chunk = SECTOR_TO_CHUNK(bio->bi_iter.bi_sector - mapper->start);
@@ -561,14 +564,6 @@ struct bio* bio_read_region_map(struct dev_region_mapper* mapper,
     return sync_bio;
 }
 
-struct bio* bio_write_region_map(struct dev_region_mapper* mapper,
-                                 struct bio* bio,
-                                 unsigned int entry) {
-    struct bio* sync_bio = NULL;
-
-    return sync_bio;
-}
-
 struct bio* spawn_sync_bio(struct sync_table* stbl,
                            struct bio* bio,
                            gfp_t gfp_mask) {
@@ -578,11 +573,17 @@ struct bio* spawn_sync_bio(struct sync_table* stbl,
     int i;
     struct bio_vec *to, from;
 
-    sync_bio = bio_alloc_bioset(GFP_NOIO, bio_segments(bio), &sync_bio_set);
+    if (bio_data_dir(bio) == READ) {
+        sync_bio = bio_alloc_bioset(GFP_NOIO, bio_segments(bio), &sync_bio_set);
+    } else {
+        sync_bio = bil_clone_fast(bio, gfp_mask, &sync_bio_set);
+    }
+
     if (!sync_bio) {
         pr_err("error allocate sync bio\n");
         return NULL;
     }
+
     sync_bio->bi_private = stbl;
     sync_bio->bi_end_io = sync_bio_endio;
     sync_bio->bi_opf = REQ_OP_WRITE;
@@ -591,19 +592,25 @@ struct bio* spawn_sync_bio(struct sync_table* stbl,
     sync_bio->bi_write_hint = bio->bi_write_hint;
     sync_bio->bi_iter.bi_sector = bio->bi_iter.bi_sector;
     sync_bio->bi_iter.bi_size = bio->bi_iter.bi_size;
-    bio_for_each_segment(bv, bio, iter)
-        sync_bio->bi_io_vec[sync_bio->bi_vcnt++] = bv;
 
-    for (i = 0, to = sync_bio->bi_io_vec; i < bio->bi_vcnt; to++, i++) {
-        struct page* sync_page;
+    if (bio_data_dir(bio) == READ) {
+        bio_for_each_segment(bv, bio, iter)
+            sync_bio->bi_io_vec[sync_bio->bi_vcnt++] = bv;
 
-        sync_page = mempool_alloc(&sync_page_pool, GFP_NOIO);
-        memcpy_from_bvec(page_address(sync_page), to);
+        for (i = 0, to = sync_bio->bi_io_vec; i < bio->bi_vcnt; to++, i++) {
+            struct page* sync_page;
 
-        to->bv_page = sync_page;
+            sync_page = mempool_alloc(&sync_page_pool, GFP_NOIO);
+            memcpy_from_bvec(page_address(sync_page), to);
+
+            to->bv_page = sync_page;
+        }
     }
 
     return sync_bio;
 }
 
-void sync_bio_endio(struct bio* bio) {}
+void sync_bio_endio(struct bio* bio) {
+    struct sync_table* stbl = bio->bi_private;
+    // TODO: xxx
+}

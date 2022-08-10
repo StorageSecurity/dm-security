@@ -69,12 +69,9 @@ struct bio* bio_region_map(struct dev_region_mapper* mapper, struct bio* bio);
 inline struct bio* __bio_region_map(struct dev_region_mapper* mapper,
                                     struct bio* bio,
                                     unsigned int entry);
-struct bio* bio_read_region_map(struct dev_region_mapper* mapper,
+struct bio* bio_region_map_sync(struct dev_region_mapper* mapper,
                                 struct bio* bio,
                                 unsigned int entry);
-struct bio* bio_write_region_map(struct dev_region_mapper* mapper,
-                                 struct bio* bio,
-                                 unsigned int entry);
 struct bio* spawn_sync_bio(struct sync_table* stbl,
                            struct bio* bio,
                            gfp_t gfp_mask);
