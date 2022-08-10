@@ -47,7 +47,7 @@
 #define DM_MSG_PREFIX "security"
 
 /* extern interfaces in region-mapper module */
-struct dev_region_mapper* dev_create_region_mapper(char* name,
+struct dev_region_mapper* dev_create_region_mapper(const char* name,
                                                    dev_t dev,
                                                    sector_t start,
                                                    sector_t sectors);
@@ -3281,7 +3281,7 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
 
     // create dev_region_mapper
     dev_reg_mapper =
-        dev_create_region_mapper(devname, cc->dev->bdev->bd_dev, ti->len);
+        dev_create_region_mapper(devname, cc->dev->bdev->bd_dev, ti->begin, ti->len);
     if (!dev_reg_mapper) {
         ti->error = "Cannot create region mapper";
         goto bad;

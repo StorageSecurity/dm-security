@@ -13,7 +13,7 @@
 
 struct dev_id {
     struct list_head list;
-    char* name;
+    const char* name;
     int major;
     int minor;
 };
@@ -38,7 +38,24 @@ struct dev_region_mapper {
     sector_t start;  // device start sector
     sector_t len;    // device length in sectors
     struct mapping_table* mapping_tbl;
+    struct dev_sync_table* dev_sync_tbl;
 };
+
+struct sync_table {
+    struct list_head list;
+    unsigned int logical_chunk;
+    unsigned int original_physical_chunk;
+    unsigned int target_physical_chunk;
+    unsigned int remain;
+    unsigned int* bitmap;
+};
+
+struct dev_sync_table {
+    struct list_head list;
+    struct list_head sync_table_head;
+    struct dev_id* dev;
+};
+LIST_HEAD(all_dev_sync_tables);
 
 #define PROC_REGION_MAPPER_DIR ("region-mapper")
 struct proc_dir_entry* proc_region_mapper;
@@ -128,7 +145,15 @@ static ssize_t region_mapper_write_proc(struct file* filp,
     unsigned int** mapping_entry = pde_data(file_inode(filp));
     char in[3];
     unsigned int rw_flags = 0;
+    unsigned int expect_type = EXPECT_RDWR_TYPE(**mapping_entry);
+    unsigned int current_type = CURRENT_RDWR_TYPE(**mapping_entry);
     pr_info("region_mapper_write_proc\n");
+
+    if (expect_type != current_type) {
+        pr_err("chunk in sync, discard update: exp_type=%d, cur_type%d\n",
+               expect_type, current_type);
+        return 0;
+    }
 
     if (copy_from_user(in, buf, count)) {
         pr_err("copy_from_user failed\n");
@@ -189,31 +214,52 @@ void free_mapping_table(struct mapping_table* tbl) {
 }
 EXPORT_SYMBOL(free_mapping_table);
 
-struct dev_region_mapper* dev_create_region_mapper(char* name,
+struct dev_region_mapper* dev_create_region_mapper(const char* name,
                                                    dev_t dev,
                                                    sector_t start,
                                                    sector_t sectors) {
-    struct dev_id* dev_id = kmalloc(sizeof(struct dev_id), GFP_KERNEL);
-    struct dev_region_mapper* mapper =
-        kmalloc(sizeof(struct dev_region_mapper), GFP_KERNEL);
-    struct mapping_table* tbl = alloc_mapping_table(sectors);
+    struct dev_id* dev_id;
+    struct dev_region_mapper* mapper;
+    struct mapping_table* tbl;
+    struct dev_sync_table* dev_sync_tbl;
     struct proc_dir_entry* entry;
     int i;
     char proc_dev[16];
     char proc_chk[16];
-    if (!dev_id || !mapper || !tbl) {
-        pr_err("region_mapper: failed to allocate dev_id or mapper or tbl\n");
+
+    dev_id = kmalloc(sizeof(struct dev_id), GFP_KERNEL);
+    if (!dev_id) {
+        pr_err("region_mapper: failed to allocate dev_id\n");
         goto err;
     }
-
     dev_id->name = name;
     dev_id->major = MAJOR(dev);
     dev_id->minor = MINOR(dev);
-    mapper->dev = dev_id;
-    mapper->mapping_tbl = tbl;
+    INIT_LIST_HEAD(&dev_id->list);
     list_add(&dev_id->list, &all_devices);
+    mapper->dev = dev_id;
+
+    mapper = kmalloc(sizeof(struct dev_region_mapper), GFP_KERNEL);
+    if (!mapper) {
+        pr_err("region_mapper: failed to allocate region mapper\n");
+        goto err;
+    }
+
+    tbl = alloc_mapping_table(sectors);
+    if (!tbl) {
+        pr_err("region_mapper: failed to allocate mapping table\n");
+        goto err;
+    }
+    mapper->mapping_tbl = tbl;
     mapper->start = start;
     mapper->len = sectors;
+
+    dev_sync_tbl = alloc_dev_sync_table(dev_id);
+    if (!dev_sync_tbl) {
+        pr_err("region_mapper: failed to allocate dev_sync_table\n");
+        goto err;
+    }
+    mapper->dev_sync_tbl = dev_sync_tbl;
 
     sprintf(proc_dev, "%d:%d", MAJOR(dev), MINOR(dev));
     entry = proc_mkdir(proc_dev, proc_region_mapper);
@@ -232,6 +278,8 @@ err:
         kfree(mapper);
     if (tbl)
         kfree(tbl);
+    if (dev_sync_tbl)
+        kfree(dev_sync_tbl);
     return NULL;
 }
 EXPORT_SYMBOL(dev_create_region_mapper);
@@ -239,8 +287,10 @@ EXPORT_SYMBOL(dev_create_region_mapper);
 void dev_destroy_region_mapper(struct dev_region_mapper* mapper) {
     struct dev_id* dev_id = mapper->dev;
     struct mapping_table* tbl = mapper->mapping_tbl;
+    struct dev_sync_table* dev_sync_tbl = mapper->dev_sync_tbl;
     char proc_dev[16];
     int i;
+
     sprintf(proc_dev, "%d:%d", dev_id->major, dev_id->minor);
     list_del(&dev_id->list);
     kfree(dev_id);
@@ -251,6 +301,7 @@ void dev_destroy_region_mapper(struct dev_region_mapper* mapper) {
     }
     remove_proc_entry(proc_dev, proc_region_mapper);
     free_mapping_table(tbl);
+    free_dev_sync_table(dev_sync_tbl);
     kfree(mapper);
 }
 EXPORT_SYMBOL(dev_destroy_region_mapper);
@@ -293,18 +344,106 @@ int alloc_new_mapping_entry(struct mapping_table* tbl) {
 }
 EXPORT_SYMBOL(alloc_new_mapping_entry);
 
+/* Internal definitions */
+
+struct dev_sync_table* alloc_dev_sync_table(struct dev_id* dev) {
+    LIST_HEAD(sync_tbl);
+    struct dev_sync_table* dev_sync_tbl =
+        kmalloc(sizeof(struct dev_sync_table), GFP_KERNEL);
+    if (!dev_sync_tbl) {
+        return NULL;
+    }
+    dev_sync_tbl->sync_table_head = sync_tbl;
+    dev_sync_tbl->dev = dev;
+    INIT_LIST_HEAD(&dev_sync_tbl->list);
+    list_add(&dev_sync_tbl->list, &all_dev_sync_tables);
+    return dev_sync_tbl;
+}
+
+void free_dev_sync_tbl(struct dev_sync_table* dev_sync_tbl) {
+    struct sync_table* tbl;
+    list_del(&dev_sync_tbl->list);
+    list_for_each_entry(tbl, &dev_sync_tbl->sync_table_head, list) {
+        list_del(&tbl->list);
+        kfree(tbl);
+    }
+    kfree(dev_sync_tbl);
+}
+
+void free_dev_sync_table(struct dev_sync_table* dev_sync_tbl) {
+    list_del(&dev_sync_tbl->list);
+    kfree(dev_sync_tbl);
+}
+
+struct sync_table* alloc_sync_table(unsigned int lc,
+                                    unsigned int opc,
+                                    unsigned int tpc) {
+    struct sync_table* stbl = kmalloc(sizeof(struct sync_table), GFP_KERNEL);
+    if (!stbl) {
+        pr_err("error allocate sync table\n");
+        goto err;
+    }
+
+    stbl->logical_chunk = lc;
+    stbl->original_physical_chunk = opc;
+    stbl->target_physical_chunk = tpc;
+    stbl->remain = SECTORS_IN_CHUNK;
+    stbl->bitmap =
+        kzalloc(SECTORS_IN_CHUNK >> sizeof(unsigned int), GFP_KERNEL);
+    if (!stbl->bitmap) {
+        pr_err("error allocate sync table bitmap\n");
+        goto err;
+    }
+
+    // INIT_LIST_HEAD(&stbl->list);
+    // list_add(&stbl->list, &all_sync_tables);
+
+    return stbl;
+
+err:
+    if (stbl->bitmap)
+        kfree(stbl->bitmap);
+    if (stbl)
+        kfree(stbl);
+    return NULL;
+}
+
+void free_sync_table(struct sync_table* tbl) {
+    kfree(tbl->bitmap);
+    kfree(tbl);
+}
+
+bool check_chunk_in_sync(dev_t dev, unsigned int lc) {
+    struct dev_sync_table* dev_stbl;
+    struct sync_table* stbl;
+    bool ret = false;
+    list_for_each_entry(dev_stbl, &all_dev_sync_tables, list) {
+        if (dev_stbl->dev->major == MAJOR(dev) &&
+            dev_stbl->dev->minor == MINOR(dev)) {
+            break;
+        }
+    }
+    list_for_each_entry(stbl, &dev_stbl->sync_table_head, list) {
+        if (stbl->logical_chunk == lc) {
+            ret = true;
+            break;
+        }
+    }
+    return ret;
+}
+
 /* BIO map functions */
 
 void bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
     unsigned int expect_type;
     unsigned int current_type;
     struct mapping_table* tbl = mapper->mapping_tbl;
-    sector_t sectors = bio->bi_iter->bi_sector - mapper->start;
+    sector_t sectors = bio->bi_iter.bi_sector - mapper->start;
     unsigned int entry = get_mapping_entry(tbl, sectors);
 
     if (entry) {
         expect_type = EXPECT_RDWR_TYPE(entry);
-        current_type = CURRENT_TYPE(entry);
+        current_type = CURRENT_RDWR_TYPE(entry);
         pr_info("region_mapper: expect type %d, current type %d\n", expect_type,
                 current_type);
         if (expect_type == current_type) {
@@ -318,9 +457,9 @@ void bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
             __bio_region_map(mapper, bio, entry);
             return;
         }
-        bio_read_region_map(mapper, bio);
+        bio_read_region_map(mapper, bio, entry);
     } else {
-        bio_write_region_map(mapper, bio);
+        bio_write_region_map(mapper, bio, entry);
     }
 }
 EXPORT_SYMBOL(bio_region_map);
@@ -328,14 +467,17 @@ EXPORT_SYMBOL(bio_region_map);
 inline void __bio_region_map(struct dev_region_mapper* mapper,
                              struct bio* bio,
                              unsigned int entry) {
-    bio->bi_iter->bi_sector = TARGET_CHUNK(entry) * CHUNK_SIZE + mapper->start;
+    bio->bi_iter.bi_sector = TARGET_CHUNK(entry) * CHUNK_SIZE + mapper->start;
 }
 
-void bio_read_region_map(struct dev_region_mapper* mapper, struct bio* bio, unsigned int entry) {
-
+void bio_read_region_map(struct dev_region_mapper* mapper,
+                         struct bio* bio,
+                         unsigned int entry) {
+    // TODO: implement
 }
 
-void bio_write_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
-
+void bio_write_region_map(struct dev_region_mapper* mapper,
+                          struct bio* bio,
+                          unsigned int entry) {
+    // TODO: implement
 }
-

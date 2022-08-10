@@ -1,11 +1,12 @@
 #ifndef __REGION_MAPPER_H
 #define __REGION_MAPPER_H
 
-#include <linux/types.h>
+#include <linux/blk_types.h>
 
 #define CHUNK_SIZE (8 * 1024 * 1024)  // 8MB
 #define CHUNK_SHIFT (22)
 #define SECTOR_TO_CHUNK(sector) ((sector) >> CHUNK_SHIFT)
+#define SECTORS_IN_CHUNK ((1 << CHUNK_SHIFT) >> SECTOR_SHIFT)
 
 #define REGION_TYPE_MASK (0x3)
 
@@ -33,10 +34,12 @@
 struct dev_id;
 struct mapping_table;
 struct dev_region_mapper;
+struct sync_table;
+struct dev_sync_table;
 
 struct list_head get_all_devices(void);
 
-struct dev_region_mapper* dev_create_region_mapper(char* name,
+struct dev_region_mapper* dev_create_region_mapper(const char* name,
                                                    dev_t dev,
                                                    sector_t start,
                                                    sector_t sectors);
@@ -46,6 +49,14 @@ struct mapping_table* alloc_mapping_table(sector_t sectors);
 void free_mapping_table(struct mapping_table* tbl);
 unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors);
 int alloc_new_mapping_entry(struct mapping_table* tbl);
+
+struct dev_sync_table* alloc_dev_sync_table(struct dev_id* dev);
+void free_dev_sync_table(struct dev_sync_table* tbl);
+struct sync_table* alloc_sync_table(unsigned int lc,
+                                    unsigned int opc,
+                                    unsigned int tpc);
+void free_sync_table(struct sync_table* tbl);
+bool check_chunk_in_sync(dev_t dev, unsigned int lc);
 
 void bio_region_map(struct dev_region_mapper* mapper, struct bio* bio);
 inline void __bio_region_map(struct dev_region_mapper* mapper,
