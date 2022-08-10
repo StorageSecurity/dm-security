@@ -1849,6 +1849,7 @@ static void clone_init(struct dm_crypt_io* io, struct bio* clone) {
 static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
     struct crypt_config* cc = io->cc;
     struct bio* clone;
+    struct bio* sync_bio;
 
     /*
      * We need the original biovec array in order to decrypt
@@ -1872,7 +1873,7 @@ static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
     }
 
     // map bio using regrion mapper
-    bio_region_map(cc->rmap, clone);
+    sync_bio = bio_region_map(cc->rmap, clone);
 
     submit_bio_noacct(clone);
     return 0;
@@ -3280,8 +3281,8 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
     }
 
     // create dev_region_mapper
-    dev_reg_mapper =
-        dev_create_region_mapper(devname, cc->dev->bdev->bd_dev, ti->begin, ti->len);
+    dev_reg_mapper = dev_create_region_mapper(devname, cc->dev->bdev->bd_dev,
+                                              ti->begin, ti->len);
     if (!dev_reg_mapper) {
         ti->error = "Cannot create region mapper";
         goto bad;

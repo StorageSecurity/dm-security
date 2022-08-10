@@ -1,15 +1,24 @@
 #include "region-mapper.h"
 #include <asm/page_types.h>
+#include <linux/bio.h>
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
+#include <linux/container_of.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
+#include <linux/mm_types.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+
+#define SYNC_POOL_SIZE 64
+#define SYNC_BIO_POOL_SIZE 2
+
+static struct bio_set sync_bio_set;
+static mempool_t sync_page_pool;
 
 struct dev_id {
     struct list_head list;
@@ -21,7 +30,7 @@ LIST_HEAD(all_devices);
 
 struct mapping_table {
     unsigned int entry_count;
-    // indicate whether the target chunk in use
+    // indicate whether the physical chunk in use
     // bitmap line start from less significant bit to most significant bit
     unsigned int* bitmap;
     // dynamic allocating page to hold mapping entries,
@@ -88,7 +97,17 @@ MODULE_DESCRIPTION("Region mapper");
 MODULE_VERSION("0.1");
 
 static int __init region_mapper_init(void) {
+    int ret;
     pr_info("region_mapper_init\n");
+
+    ret = mempool_init_page_pool(&sync_page_pool, SYNC_POOL_SIZE, 0);
+    BUG_ON(ret);
+    pr_info("sync pool size: %d pages\n", SYNC_POOL_SIZE);
+
+    ret = bioset_init(&sync_bio_set, SYNC_BIO_POOL_SIZE, 0, 0);
+    BUG_ON(ret);
+    pr_info("sync bio pool size: %d pages\n", SYNC_BIO_POOL_SIZE);
+
     proc_region_mapper = proc_mkdir(PROC_REGION_MAPPER_DIR, NULL);
     if (proc_region_mapper == NULL) {
         pr_err("proc_mkdir failed: %s\n", PROC_REGION_MAPPER_DIR);
@@ -323,8 +342,8 @@ unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors) {
 }
 EXPORT_SYMBOL(get_mapping_entry);
 
-int alloc_new_mapping_entry(struct mapping_table* tbl) {
-    int i, j;
+unsigned int find_free_physical_chunk(struct mapping_table* tbl) {
+    unsigned i, j;
 
     // quickly find out not fully allocated bitmap line
     for (i = 0; i < tbl->entry_count; i++) {
@@ -395,9 +414,6 @@ struct sync_table* alloc_sync_table(unsigned int lc,
         goto err;
     }
 
-    // INIT_LIST_HEAD(&stbl->list);
-    // list_add(&stbl->list, &all_sync_tables);
-
     return stbl;
 
 err:
@@ -408,9 +424,19 @@ err:
     return NULL;
 }
 
-void free_sync_table(struct sync_table* tbl) {
-    kfree(tbl->bitmap);
-    kfree(tbl);
+void free_sync_table(struct sync_table* stbl) {
+    kfree(stbl->bitmap);
+    kfree(stbl);
+}
+
+struct sync_table* get_sync_table(struct dev_sync_table* tbl, unsigned int lc) {
+    struct sync_table* stbl;
+    list_for_each_entry(stbl, &tbl->sync_table_head, list) {
+        if (stbl->logical_chunk == lc) {
+            return stbl;
+        }
+    }
+    return NULL;
 }
 
 bool check_chunk_in_sync(dev_t dev, unsigned int lc) {
@@ -432,9 +458,33 @@ bool check_chunk_in_sync(dev_t dev, unsigned int lc) {
     return ret;
 }
 
+bool check_sectors_synced(struct sync_table* stbl,
+                          sector_t start,
+                          sector_t sectors) {
+    unsigned int i = start / sizeof(int) * 8;
+    unsigned int j = start % sizeof(int) * 8;
+
+    // if (sectors + j <= sizeof(int) * 8) {
+    //     if (stbl->bitmap[i] & ((1 << sectors) - 1) << j) {
+    //         return true;
+    //     }
+    // } else {
+    //     if (stbl->bitmap[i] & ((1 << (sizeof(int) * 8 - j)) - 1)) {
+    //         return true;
+    //     }
+    //     if (stbl->bitmap[i + 1] &
+    //         ((1 << (sectors - (sizeof(int) * 8 - j))) - 1)) {
+    //         return true;
+    //     }
+    // }
+
+    // if (~(stbl->bitmap[i] & ((1 << (j + 1)) - 1))) {
+    //     return false;
+    // }
+}
 /* BIO map functions */
 
-void bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
+struct bio* bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
     unsigned int expect_type;
     unsigned int current_type;
     struct mapping_table* tbl = mapper->mapping_tbl;
@@ -447,37 +497,113 @@ void bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
         pr_info("region_mapper: expect type %d, current type %d\n", expect_type,
                 current_type);
         if (expect_type == current_type) {
-            __bio_region_map(mapper, bio, entry);
-            return;
+            return __bio_region_map(mapper, bio, entry);
         }
     }
 
     if (bio_data_dir(bio) == READ) {
         if (!entry) {
-            __bio_region_map(mapper, bio, entry);
-            return;
+            return __bio_region_map(mapper, bio, entry);
         }
-        bio_read_region_map(mapper, bio, entry);
+        return bio_read_region_map(mapper, bio, entry);
     } else {
-        bio_write_region_map(mapper, bio, entry);
+        return bio_write_region_map(mapper, bio, entry);
     }
 }
 EXPORT_SYMBOL(bio_region_map);
 
-inline void __bio_region_map(struct dev_region_mapper* mapper,
-                             struct bio* bio,
-                             unsigned int entry) {
+inline struct bio* __bio_region_map(struct dev_region_mapper* mapper,
+                                    struct bio* bio,
+                                    unsigned int entry) {
     bio->bi_iter.bi_sector = TARGET_CHUNK(entry) * CHUNK_SIZE + mapper->start;
+    return NULL;
 }
 
-void bio_read_region_map(struct dev_region_mapper* mapper,
-                         struct bio* bio,
-                         unsigned int entry) {
-    // TODO: implement
+struct bio* bio_read_region_map(struct dev_region_mapper* mapper,
+                                struct bio* bio,
+                                unsigned int entry) {
+    int logical_chunk = SECTOR_TO_CHUNK(bio->bi_iter.bi_sector - mapper->start);
+    struct sync_table* stbl;
+    unsigned int original_physical_chunk;
+    unsigned int target_physical_chunk;
+    struct bio* sync_bio = NULL;
+
+    if (!check_chunk_in_sync(mapper->dev, logical_chunk)) {
+        original_physical_chunk = TARGET_CHUNK(entry);
+        target_physical_chunk = find_free_physical_chunk(mapper->mapping_tbl);
+        stbl = alloc_sync_table(logical_chunk, original_physical_chunk,
+                                target_physical_chunk);
+        if (!stbl) {
+            pr_err("error allocate sync table\n");
+            return;
+        }
+        INIT_LIST_HEAD(&stbl->list);
+        list_add(&stbl->list, &mapper->dev_sync_tbl->sync_table_head);
+    } else {
+        stbl = get_sync_table(mapper->dev_sync_tbl, logical_chunk);
+        original_physical_chunk = stbl->original_physical_chunk;
+        target_physical_chunk = stbl->target_physical_chunk;
+    }
+
+    if (!check_sectors_synced(stbl, bio->bi_iter.bi_sector, bio_sectors(bio))) {
+        unsigned int target_entry;
+        sync_bio = spawn_sync_bio(stbl, bio, GFP_NOWAIT);
+        if (!sync_bio) {
+            pr_err("error spawn sync bio\n");
+            return NULL;
+        }
+
+        target_entry = TARGET_CHUNK_SET(entry, target_physical_chunk);
+        __bio_region_map(mapper, sync_bio, target_entry);
+    }
+
+    __bio_region_map(mapper, bio, entry);
+    return sync_bio;
 }
 
-void bio_write_region_map(struct dev_region_mapper* mapper,
-                          struct bio* bio,
-                          unsigned int entry) {
-    // TODO: implement
+struct bio* bio_write_region_map(struct dev_region_mapper* mapper,
+                                 struct bio* bio,
+                                 unsigned int entry) {
+    struct bio* sync_bio = NULL;
+
+    return sync_bio;
 }
+
+struct bio* spawn_sync_bio(struct sync_table* stbl,
+                           struct bio* bio,
+                           gfp_t gfp_mask) {
+    struct bio* sync_bio;
+    struct bvec_iter iter;
+    struct bio_vec bv;
+    int i;
+    struct bio_vec *to, from;
+
+    sync_bio = bio_alloc_bioset(GFP_NOIO, bio_segments(bio), &sync_bio_set);
+    if (!sync_bio) {
+        pr_err("error allocate sync bio\n");
+        return NULL;
+    }
+    sync_bio->bi_private = stbl;
+    sync_bio->bi_end_io = sync_bio_endio;
+    sync_bio->bi_opf = REQ_OP_WRITE;
+    sync_bio->bi_bdev = bio->bi_bdev;
+    sync_bio->bi_ioprio = bio->bi_ioprio;
+    sync_bio->bi_write_hint = bio->bi_write_hint;
+    sync_bio->bi_iter.bi_sector = bio->bi_iter.bi_sector;
+    sync_bio->bi_iter.bi_size = bio->bi_iter.bi_size;
+    bio_for_each_segment(bv, bio, iter)
+        sync_bio->bi_io_vec[sync_bio->bi_vcnt++] = bv;
+
+    for (i = 0, to = sync_bio->bi_io_vec; i < bio->bi_vcnt; to++, i++) {
+        struct page* sync_page;
+
+        sync_page = mempool_alloc(&sync_page_pool, GFP_NOIO);
+        memcpy_from_bvec(page_address(sync_page), to);
+
+        to->bv_page = sync_page;
+    }
+
+    return sync_bio;
+}
+
+void sync_bio_endio(struct bio* bio) {}
