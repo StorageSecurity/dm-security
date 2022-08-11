@@ -3,6 +3,7 @@
 
 #include <linux/blk_types.h>
 #include <linux/gfp.h>
+#include <linux/workqueue.h>
 
 #define CHUNK_SIZE (8 * 1024 * 1024)  // 8MB
 #define CHUNK_SHIFT (22)
@@ -34,6 +35,9 @@
 #define TARGET_CHUNK_SET(entry, chunk) \
     (((entry) & ~TARGET_CHUNK_MASK) | (chunk))
 
+#define BITMAP_SET(bitmap, bit) ((bitmap) |= (1 << (bit)))
+#define BITMAP_CLEAR(bitmap, bit) ((bitmap) &= ~(1 << (bit)))
+
 struct dev_id;
 struct mapping_table;
 struct dev_region_mapper;
@@ -50,7 +54,12 @@ void dev_destroy_region_mapper(struct dev_region_mapper* mapper);
 
 struct mapping_table* alloc_mapping_table(sector_t sectors);
 void free_mapping_table(struct mapping_table* tbl);
+inline void use_physical_chunk(struct mapping_table* tbl, unsigned int pc);
+inline void free_physical_chunk(struct mapping_table* tbl, unsigned int pc);
 unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors);
+void set_mapping_entry(struct mapping_table* tbl,
+                       unsigned int lc,
+                       unsigned int entry);
 unsigned int find_free_physical_chunk(struct mapping_table* tbl);
 
 struct dev_sync_table* alloc_dev_sync_table(struct dev_id* dev);
@@ -60,7 +69,7 @@ struct sync_table* alloc_sync_table(unsigned int lc,
                                     unsigned int tpc);
 void free_sync_table(struct sync_table* stbl);
 struct sync_table* get_sync_table(struct dev_sync_table* tbl, unsigned int lc);
-bool check_chunk_in_sync(dev_t dev, unsigned int lc);
+bool check_chunk_in_sync(struct dev_id* dev, unsigned int lc);
 bool check_sectors_synced(struct sync_table* stbl,
                           sector_t start,
                           sector_t sectors);
@@ -76,5 +85,8 @@ struct bio* spawn_sync_bio(struct sync_table* stbl,
                            struct bio* bio,
                            gfp_t gfp_mask);
 void sync_bio_endio(struct bio* bio);
+struct bio* alloc_flush_mapping_table_bio(struct dev_region_mapper* mapper,
+                                          gfp_t gfp_mask);
+void flush_mapping_table_endio(struct bio* bio);
 
 #endif
