@@ -3,7 +3,6 @@
 
 #include <linux/blk_types.h>
 #include <linux/gfp.h>
-#include <linux/workqueue.h>
 
 #define CHUNK_SIZE (8 * 1024 * 1024)  // 8MB
 #define CHUNK_SHIFT (22)
@@ -44,12 +43,49 @@ struct dev_region_mapper;
 struct sync_table;
 struct dev_sync_table;
 
+struct crypt_strategy {
+    char cipher_string[16];
+    struct crypto_skcipher** cipher_tfm;
+    unsigned tfms_count;
+
+    const struct crypt_iv_operations* iv_gen_ops;
+    unsigned int iv_size;
+
+    /*
+     * Layout of each crypto request:
+     *
+     *   struct skcipher_request
+     *      context
+     *      padding
+     *   struct dm_crypt_request
+     *      padding
+     *   IV
+     *
+     * The padding is added so that dm_crypt_request and the IV are
+     * correctly aligned.
+     */
+    unsigned int dmreq_start;
+
+    unsigned per_io_data_size;
+
+    mempool_t req_pool;
+};
+
+struct crypt_strategies {
+    struct crypt_strategy read_write_efficient;
+    struct crypt_strategy read_most_efficient;
+    struct crypt_strategy write_most_efficient;
+    struct crypt_strategy default_strategy;
+};
+
 struct list_head get_all_devices(void);
 
 struct dev_region_mapper* dev_create_region_mapper(const char* name,
                                                    dev_t dev,
-                                                   sector_t start,
-                                                   sector_t sectors);
+                                                   sector_t meta_start,
+                                                   sector_t meta_sectors,
+                                                   sector_t data_start,
+                                                   sector_t data_sectors);
 void dev_destroy_region_mapper(struct dev_region_mapper* mapper);
 
 struct mapping_table* alloc_mapping_table(sector_t sectors);

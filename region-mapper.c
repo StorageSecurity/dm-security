@@ -44,8 +44,10 @@ struct mapping_table {
 
 struct dev_region_mapper {
     struct dev_id* dev;
-    sector_t start;  // device start sector
-    sector_t len;    // device length in sectors
+    sector_t meta_start;    // metadata start sector
+    sector_t meta_sectors;  // metadata length in sector
+    sector_t data_start;    // device start sector
+    sector_t data_sectors;  // device length in sectors
     struct mapping_table* mapping_tbl;
     struct dev_sync_table* dev_sync_tbl;
 };
@@ -249,8 +251,10 @@ inline void free_physical_chunk(struct mapping_table* tbl, unsigned int pc) {
 
 struct dev_region_mapper* dev_create_region_mapper(const char* name,
                                                    dev_t dev,
-                                                   sector_t start,
-                                                   sector_t sectors) {
+                                                   sector_t meta_start,
+                                                   sector_t meta_sectors,
+                                                   sector_t data_start,
+                                                   sector_t data_sectors) {
     struct dev_id* dev_id;
     struct dev_region_mapper* mapper;
     struct mapping_table* tbl;
@@ -654,8 +658,6 @@ void sync_bio_endio(struct bio* bio) {
     }
 
     if (stbl->remain == 0) {
-        // TODO: persist mapping table to disk metadata
-        // struct bio* flush_bio = alloc_flush_mapping_table_bio();
         struct dev_sync_table* dev_sync_tbl = stbl->private;
         struct dev_region_mapper* mapper = dev_sync_tbl->private;
         set_mapping_entry(mapper->mapping_tbl, stbl->logical_chunk,
