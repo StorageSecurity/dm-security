@@ -4,6 +4,11 @@
 #include <linux/blk_types.h>
 #include <linux/gfp.h>
 
+#define REGION_READ_HOT_WRITE_HOT (0b11)
+#define REGION_READ_HOT_WRITE_COLD (0b10)
+#define REGION_READ_COLD_WRITE_HOT (0b01)
+#define REGION_READ_COLD_WRITE_COLD (0b00)
+
 #define CHUNK_SIZE (8 * 1024 * 1024)  // 8MB
 #define CHUNK_SHIFT (22)
 #define SECTOR_TO_CHUNK(sectors) ((sectors) >> CHUNK_SHIFT)
@@ -42,40 +47,22 @@ struct mapping_table;
 struct dev_region_mapper;
 struct sync_table;
 struct dev_sync_table;
+struct sync_io;
 
-struct crypt_strategy {
-    char cipher_string[16];
-    struct crypto_skcipher** cipher_tfm;
-    unsigned tfms_count;
-
-    const struct crypt_iv_operations* iv_gen_ops;
-    unsigned int iv_size;
-
-    /*
-     * Layout of each crypto request:
-     *
-     *   struct skcipher_request
-     *      context
-     *      padding
-     *   struct dm_crypt_request
-     *      padding
-     *   IV
-     *
-     * The padding is added so that dm_crypt_request and the IV are
-     * correctly aligned.
-     */
-    unsigned int dmreq_start;
-
-    unsigned per_io_data_size;
-
-    mempool_t req_pool;
+struct dev_region_mapper {
+    struct dev_id* dev;
+    sector_t meta_start;    // metadata start sector
+    sector_t meta_sectors;  // metadata length in sector
+    sector_t data_start;    // device start sector
+    sector_t data_sectors;  // device length in sectors
+    struct mapping_table* mapping_tbl;
+    struct dev_sync_table* dev_sync_tbl;
 };
 
-struct crypt_strategies {
-    struct crypt_strategy read_write_efficient;
-    struct crypt_strategy read_most_efficient;
-    struct crypt_strategy write_most_efficient;
-    struct crypt_strategy default_strategy;
+struct sync_io {
+    unsigned int src_retion_type;
+    unsigned int dst_region_type;
+    struct bio* base_io;
 };
 
 struct list_head get_all_devices(void);
@@ -110,13 +97,14 @@ bool check_sectors_synced(struct sync_table* stbl,
                           sector_t start,
                           sector_t sectors);
 
-struct bio* bio_region_map(struct dev_region_mapper* mapper, struct bio* bio);
-inline struct bio* __bio_region_map(struct dev_region_mapper* mapper,
+struct sync_io* bio_region_map(struct dev_region_mapper* mapper,
+                               struct bio* bio);
+inline struct sync_io* __bio_region_map(struct dev_region_mapper* mapper,
+                                        struct bio* bio,
+                                        unsigned int entry);
+struct sync_io* bio_region_map_sync(struct dev_region_mapper* mapper,
                                     struct bio* bio,
                                     unsigned int entry);
-struct bio* bio_region_map_sync(struct dev_region_mapper* mapper,
-                                struct bio* bio,
-                                unsigned int entry);
 struct bio* spawn_sync_bio(struct sync_table* stbl,
                            struct bio* bio,
                            gfp_t gfp_mask);

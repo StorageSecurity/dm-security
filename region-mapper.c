@@ -42,16 +42,6 @@ struct mapping_table {
     unsigned int* mapping_page;
 };
 
-struct dev_region_mapper {
-    struct dev_id* dev;
-    sector_t meta_start;    // metadata start sector
-    sector_t meta_sectors;  // metadata length in sector
-    sector_t data_start;    // device start sector
-    sector_t data_sectors;  // device length in sectors
-    struct mapping_table* mapping_tbl;
-    struct dev_sync_table* dev_sync_tbl;
-};
-
 struct sync_table {
     struct list_head list;
     unsigned int logical_chunk;
@@ -282,14 +272,16 @@ struct dev_region_mapper* dev_create_region_mapper(const char* name,
         goto err;
     }
 
-    tbl = alloc_mapping_table(sectors);
+    tbl = alloc_mapping_table(data_sectors);
     if (!tbl) {
         pr_err("region_mapper: failed to allocate mapping table\n");
         goto err;
     }
     mapper->mapping_tbl = tbl;
-    mapper->start = start;
-    mapper->len = sectors;
+    mapper->meta_start = meta_start;
+    mapper->meta_sectors = meta_sectors;
+    mapper->data_start = data_start;
+    mapper->data_sectors = data_sectors;
 
     dev_sync_tbl = alloc_dev_sync_table(dev_id);
     if (!dev_sync_tbl) {
@@ -521,11 +513,11 @@ bool check_sectors_synced(struct sync_table* stbl,
 }
 /* BIO map functions */
 
-struct bio* bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
+struct sync_io* bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
     unsigned int expect_type;
     unsigned int current_type;
     struct mapping_table* tbl = mapper->mapping_tbl;
-    sector_t sectors = bio->bi_iter.bi_sector - mapper->start;
+    sector_t sectors = bio->bi_iter.bi_sector - mapper->data_start;
     unsigned int entry = get_mapping_entry(tbl, sectors);
 
     if (entry) {
@@ -545,21 +537,21 @@ struct bio* bio_region_map(struct dev_region_mapper* mapper, struct bio* bio) {
 }
 EXPORT_SYMBOL(bio_region_map);
 
-inline struct bio* __bio_region_map(struct dev_region_mapper* mapper,
+inline struct sync_io* __bio_region_map(struct dev_region_mapper* mapper,
                                     struct bio* bio,
                                     unsigned int entry) {
-    bio->bi_iter.bi_sector = TARGET_CHUNK(entry) * CHUNK_SIZE + mapper->start;
+    bio->bi_iter.bi_sector = TARGET_CHUNK(entry) * CHUNK_SIZE + mapper->data_start;
     return NULL;
 }
 
-struct bio* bio_region_map_sync(struct dev_region_mapper* mapper,
+struct sync_io* bio_region_map_sync(struct dev_region_mapper* mapper,
                                 struct bio* bio,
                                 unsigned int entry) {
-    int logical_chunk = SECTOR_TO_CHUNK(bio->bi_iter.bi_sector - mapper->start);
+    int logical_chunk = SECTOR_TO_CHUNK(bio->bi_iter.bi_sector - mapper->data_start);
     struct sync_table* stbl;
     unsigned int original_physical_chunk;
     unsigned int target_physical_chunk;
-    struct bio* sync_bio = NULL;
+    struct sync_io* sync_io = NULL;
 
     if (!check_chunk_in_sync(mapper->dev, logical_chunk)) {
         original_physical_chunk = TARGET_CHUNK(entry);
@@ -582,18 +574,23 @@ struct bio* bio_region_map_sync(struct dev_region_mapper* mapper,
 
     if (!check_sectors_synced(stbl, bio->bi_iter.bi_sector, bio_sectors(bio))) {
         unsigned int target_entry;
-        sync_bio = spawn_sync_bio(stbl, bio, GFP_NOWAIT);
-        if (!sync_bio) {
+        sync_io = kmalloc(sizeof(struct sync_io), GFP_KERNEL);
+        if (!sync_io) {
+            pr_err("error allocate sync_io\n");
+            return NULL;
+        }
+        sync_io->base_io = spawn_sync_bio(stbl, bio, GFP_NOWAIT);
+        if (!sync_io->base_io) {
             pr_err("error spawn sync bio\n");
             return NULL;
         }
 
         target_entry = TARGET_CHUNK_SET(entry, target_physical_chunk);
-        __bio_region_map(mapper, sync_bio, target_entry);
+        __bio_region_map(mapper, sync_io->base_io, target_entry);
     }
 
     __bio_region_map(mapper, bio, entry);
-    return sync_bio;
+    return sync_io;
 }
 
 struct bio* spawn_sync_bio(struct sync_table* stbl,

@@ -71,6 +71,7 @@ struct convert_context {
  */
 struct dm_crypt_io {
     struct crypt_config* cc;
+    struct crypt_strategy* cs;
     struct bio* base_bio;
     struct work_struct work;
     struct tasklet_struct tasklet;
@@ -94,14 +95,16 @@ struct dm_crypt_request {
 struct crypt_config;
 
 struct crypt_iv_operations {
-    int (*ctr)(struct crypt_config* cc, struct dm_target* ti, const char* opts);
-    void (*dtr)(struct crypt_config* cc);
-    int (*init)(struct crypt_config* cc);
-    int (*wipe)(struct crypt_config* cc);
-    int (*generator)(struct crypt_config* cc,
+    int (*ctr)(struct crypt_strategy* cs,
+               struct dm_target* ti,
+               const char* opts);
+    void (*dtr)(struct crypt_strategy* cs);
+    int (*init)(struct crypt_strategy* cs);
+    int (*wipe)(struct crypt_strategy* cs);
+    int (*generator)(struct crypt_strategy* cs,
                      u8* iv,
                      struct dm_crypt_request* dmreq);
-    int (*post)(struct crypt_config* cc,
+    int (*post)(struct crypt_strategy* cs,
                 u8* iv,
                 struct dm_crypt_request* dmreq);
 };
@@ -125,6 +128,41 @@ enum cipher_flags {
                                */
     CRYPT_ENCRYPT_PREPROCESS, /* Must preprocess data for encryption (elephant)
                                */
+};
+
+struct crypt_strategy {
+    char cipher_string[16];
+    struct crypto_skcipher** cipher_tfm;
+    unsigned tfms_count;
+
+    const struct crypt_iv_operations* iv_gen_ops;
+    unsigned int iv_size;
+
+    /*
+     * Layout of each crypto request:
+     *
+     *   struct skcipher_request
+     *      context
+     *      padding
+     *   struct dm_crypt_request
+     *      padding
+     *   IV
+     *
+     * The padding is added so that dm_crypt_request and the IV are
+     * correctly aligned.
+     */
+    unsigned int dmreq_start;
+
+    unsigned per_bio_data_size;
+
+    mempool_t req_pool;
+};
+
+struct crypt_strategies {
+    struct crypt_strategy read_write_efficient;
+    struct crypt_strategy read_most_efficient;
+    struct crypt_strategy write_most_efficient;
+    struct crypt_strategy default_strategy;
 };
 
 /*
@@ -187,8 +225,8 @@ static void kcryptd_queue_crypt(struct dm_crypt_io* io);
 /*
  * Use this to access cipher attributes that are independent of the key.
  */
-static struct crypto_skcipher* any_tfm(struct crypt_config* cc) {
-    return cc->crypt_strategies.default_strategy.cipher_tfm[0];
+static struct crypto_skcipher* any_tfm(struct crypt_strategy* cs) {
+    return cs->cipher_tfm[0];
 }
 
 static int crypt_iv_essiv_gen(struct crypt_strategy* cs,
@@ -222,34 +260,35 @@ static void crypt_convert_init(struct crypt_config* cc,
     init_completion(&ctx->restart);
 }
 
-static struct dm_crypt_request* dmreq_of_req(struct crypt_config* cc,
+static struct dm_crypt_request* dmreq_of_req(struct crypt_strategy* cs,
                                              void* req) {
-    return (struct dm_crypt_request*)((char*)req + cc->dmreq_start);
+    return (struct dm_crypt_request*)((char*)req + cs->dmreq_start);
 }
 
-static void* req_of_dmreq(struct crypt_config* cc,
+static void* req_of_dmreq(struct crypt_strategy* cs,
                           struct dm_crypt_request* dmreq) {
-    return (void*)((char*)dmreq - cc->dmreq_start);
+    return (void*)((char*)dmreq - cs->dmreq_start);
 }
 
-static u8* iv_of_dmreq(struct crypt_config* cc,
+static u8* iv_of_dmreq(struct crypt_strategy* cs,
                        struct dm_crypt_request* dmreq) {
     return (u8*)ALIGN((unsigned long)(dmreq + 1),
-                      crypto_skcipher_alignmask(any_tfm(cc)) + 1);
+                      crypto_skcipher_alignmask(any_tfm(cs)) + 1);
 }
 
-static u8* org_iv_of_dmreq(struct crypt_config* cc,
+static u8* org_iv_of_dmreq(struct crypt_strategy* cs,
                            struct dm_crypt_request* dmreq) {
-    return iv_of_dmreq(cc, dmreq) + cc->iv_size;
+    return iv_of_dmreq(cs, dmreq) + cs->iv_size;
 }
 
-static __le64* org_sector_of_dmreq(struct crypt_config* cc,
+static __le64* org_sector_of_dmreq(struct crypt_strategy* cs,
                                    struct dm_crypt_request* dmreq) {
-    u8* ptr = iv_of_dmreq(cc, dmreq) + cc->iv_size + cc->iv_size;
+    u8* ptr = iv_of_dmreq(cs, dmreq) + cs->iv_size + cs->iv_size;
     return (__le64*)ptr;
 }
 
 static int crypt_convert_block_skcipher(struct crypt_config* cc,
+                                        struct crypt_strategy* cs,
                                         struct convert_context* ctx,
                                         struct skcipher_request* req) {
     struct bio_vec bv_in = bio_iter_iovec(ctx->bio_in, ctx->iter_in);
@@ -264,16 +303,16 @@ static int crypt_convert_block_skcipher(struct crypt_config* cc,
     if (unlikely(bv_in.bv_len & (cc->sector_size - 1)))
         return -EIO;
 
-    dmreq = dmreq_of_req(cc, req);
+    dmreq = dmreq_of_req(cs, req);
     dmreq->iv_sector = ctx->cc_sector;
     if (test_bit(CRYPT_IV_LARGE_SECTORS, &cc->cipher_flags))
         dmreq->iv_sector >>= cc->sector_shift;
     dmreq->ctx = ctx;
 
-    iv = iv_of_dmreq(cc, dmreq);
-    org_iv = org_iv_of_dmreq(cc, dmreq);
+    iv = iv_of_dmreq(cs, dmreq);
+    org_iv = org_iv_of_dmreq(cs, dmreq);
 
-    sector = org_sector_of_dmreq(cc, dmreq);
+    sector = org_sector_of_dmreq(cs, dmreq);
     *sector = cpu_to_le64(ctx->cc_sector - cc->iv_offset);
 
     /* For skcipher we use only the first sg item */
@@ -286,15 +325,15 @@ static int crypt_convert_block_skcipher(struct crypt_config* cc,
     sg_init_table(sg_out, 1);
     sg_set_page(sg_out, bv_out.bv_page, cc->sector_size, bv_out.bv_offset);
 
-    if (cc->iv_gen_ops) {
-        r = cc->iv_gen_ops->generator(cc, org_iv, dmreq);
+    if (cs->iv_gen_ops) {
+        r = cs->iv_gen_ops->generator(cs, org_iv, dmreq);
         if (r < 0)
             return r;
         /* Data can be already preprocessed in generator */
         if (test_bit(CRYPT_ENCRYPT_PREPROCESS, &cc->cipher_flags))
             sg_in = sg_out;
         /* Working copy of IV, to be modified in crypto API */
-        memcpy(iv, org_iv, cc->iv_size);
+        memcpy(iv, org_iv, cs->iv_size);
     }
 
     skcipher_request_set_crypt(req, sg_in, sg_out, cc->sector_size, iv);
@@ -304,8 +343,8 @@ static int crypt_convert_block_skcipher(struct crypt_config* cc,
     else
         r = crypto_skcipher_decrypt(req);
 
-    if (!r && cc->iv_gen_ops && cc->iv_gen_ops->post)
-        r = cc->iv_gen_ops->post(cc, org_iv, dmreq);
+    if (!r && cs->iv_gen_ops && cs->iv_gen_ops->post)
+        r = cs->iv_gen_ops->post(cs, org_iv, dmreq);
 
     bio_advance_iter(ctx->bio_in, &ctx->iter_in, cc->sector_size);
     bio_advance_iter(ctx->bio_out, &ctx->iter_out, cc->sector_size);
@@ -316,18 +355,18 @@ static int crypt_convert_block_skcipher(struct crypt_config* cc,
 static void kcryptd_async_done(struct crypto_async_request* async_req,
                                int error);
 
-static int crypt_alloc_req_skcipher(struct crypt_config* cc,
+static int crypt_alloc_req_skcipher(struct crypt_strategy* cs,
                                     struct convert_context* ctx) {
-    unsigned key_index = ctx->cc_sector & (cc->tfms_count - 1);
+    unsigned key_index = ctx->cc_sector & (cs->tfms_count - 1);
 
     if (!ctx->req) {
-        ctx->req = mempool_alloc(&cc->req_pool,
+        ctx->req = mempool_alloc(&cs->req_pool,
                                  in_interrupt() ? GFP_ATOMIC : GFP_NOIO);
         if (!ctx->req)
             return -ENOMEM;
     }
 
-    skcipher_request_set_tfm(ctx->req, cc->cipher_tfm.tfms[key_index]);
+    skcipher_request_set_tfm(ctx->req, cs->cipher_tfm[key_index]);
 
     /*
      * Use REQ_MAY_BACKLOG so a cipher driver internally backlogs
@@ -335,35 +374,36 @@ static int crypt_alloc_req_skcipher(struct crypt_config* cc,
      */
     skcipher_request_set_callback(ctx->req, CRYPTO_TFM_REQ_MAY_BACKLOG,
                                   kcryptd_async_done,
-                                  dmreq_of_req(cc, ctx->req));
+                                  dmreq_of_req(cs, ctx->req));
 
     return 0;
 }
 
-static int crypt_alloc_req(struct crypt_config* cc,
+static int crypt_alloc_req(struct crypt_strategy* cs,
                            struct convert_context* ctx) {
-    return crypt_alloc_req_skcipher(cc, ctx);
+    return crypt_alloc_req_skcipher(cs, ctx);
 }
 
-static void crypt_free_req_skcipher(struct crypt_config* cc,
+static void crypt_free_req_skcipher(struct crypt_strategy* cs,
                                     struct skcipher_request* req,
                                     struct bio* base_bio) {
-    struct dm_crypt_io* io = dm_per_bio_data(base_bio, cc->per_bio_data_size);
+    struct dm_crypt_io* io = dm_per_bio_data(base_bio, cs->per_bio_data_size);
 
     if ((struct skcipher_request*)(io + 1) != req)
-        mempool_free(req, &cc->req_pool);
+        mempool_free(req, &cs->req_pool);
 }
 
-static void crypt_free_req(struct crypt_config* cc,
+static void crypt_free_req(struct crypt_strategy* cs,
                            void* req,
                            struct bio* base_bio) {
-    crypt_free_req_skcipher(cc, req, base_bio);
+    crypt_free_req_skcipher(cs, req, base_bio);
 }
 
 /*
  * Encrypt / decrypt data from one bio to another one (can be the same one)
  */
 static blk_status_t crypt_convert(struct crypt_config* cc,
+                                  struct crypt_strategy* cs,
                                   struct convert_context* ctx,
                                   bool atomic,
                                   bool reset_pending) {
@@ -379,7 +419,7 @@ static blk_status_t crypt_convert(struct crypt_config* cc,
         atomic_set(&ctx->cc_pending, 1);
 
     while (ctx->iter_in.bi_size && ctx->iter_out.bi_size) {
-        r = crypt_alloc_req(cc, ctx);
+        r = crypt_alloc_req(cs, ctx);
         if (r) {
             complete(&ctx->restart);
             return BLK_STS_DEV_RESOURCE;
@@ -387,7 +427,7 @@ static blk_status_t crypt_convert(struct crypt_config* cc,
 
         atomic_inc(&ctx->cc_pending);
 
-        r = crypt_convert_block_skcipher(cc, ctx, ctx->req);
+        r = crypt_convert_block_skcipher(cc, cs, ctx, ctx->req);
 
         switch (r) {
             /*
@@ -525,9 +565,11 @@ static void crypt_free_buffer_pages(struct crypt_config* cc,
 
 static void crypt_io_init(struct dm_crypt_io* io,
                           struct crypt_config* cc,
+                          struct crypt_strategy* cs,
                           struct bio* bio,
                           sector_t sector) {
     io->cc = cc;
+    io->cs = cs;
     io->base_bio = bio;
     io->sector = sector;
     io->error = 0;
@@ -550,6 +592,7 @@ static void kcryptd_io_bio_endio(struct work_struct* work) {
  */
 static void crypt_dec_pending(struct dm_crypt_io* io) {
     struct crypt_config* cc = io->cc;
+    struct crypt_strategy* cs = io->cs;
     struct bio* base_bio = io->base_bio;
     blk_status_t error = io->error;
 
@@ -557,7 +600,7 @@ static void crypt_dec_pending(struct dm_crypt_io* io) {
         return;
 
     if (io->ctx.req)
-        crypt_free_req(cc, io->ctx.req, base_bio);
+        crypt_free_req(cs, io->ctx.req, base_bio);
 
     base_bio->bi_status = error;
 
@@ -633,8 +676,9 @@ static void clone_init(struct dm_crypt_io* io, struct bio* clone) {
 
 static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
     struct crypt_config* cc = io->cc;
+    struct crypt_strategy* cs = io->cs;
     struct bio* clone;
-    struct bio* sync_bio;
+    struct sync_io* sync_io;
 
     /*
      * We need the original biovec array in order to decrypt
@@ -652,7 +696,22 @@ static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
     clone->bi_iter.bi_sector = cc->start + io->sector;
 
     // map bio using regrion mapper
-    sync_bio = bio_region_map(cc->rmap, clone);
+    sync_io = bio_region_map(cc->rmap, clone);
+    if (sync_io != NULL) {
+        // encrypt with new strategy then submit
+        int ret;
+        struct convert_context ctx;
+        crypt_convert_init(cc, &ctx, sync_io->base_io, sync_io->base_io,
+                           io->sector);
+        ret = crypt_convert(cc, cs, &ctx,
+                            test_bit(DM_CRYPT_NO_WRITE_WORKQUEUE, &cc->flags),
+                            true);
+        if (ret) {
+            bio_put(clone);
+            return 1;
+        }
+        submit_bio_noacct(sync_io->base_io);
+    }
 
     submit_bio_noacct(clone);
     return 0;
@@ -675,7 +734,16 @@ static void kcryptd_queue_read(struct dm_crypt_io* io) {
 }
 
 static void kcryptd_io_write(struct dm_crypt_io* io) {
+    struct crypt_config* cc = io->cc;
+    struct sync_io* sync_io;
     struct bio* clone = io->ctx.bio_out;
+
+    // map bio using regrion mapper
+    sync_io = bio_region_map(cc->rmap, clone);
+    if (sync_io != NULL) {
+        // submit directly
+        submit_bio_noacct(sync_io->base_io);
+    }
 
     submit_bio_noacct(clone);
 }
@@ -801,6 +869,7 @@ static bool kcryptd_crypt_write_inline(struct crypt_config* cc,
 static void kcryptd_crypt_write_continue(struct work_struct* work) {
     struct dm_crypt_io* io = container_of(work, struct dm_crypt_io, work);
     struct crypt_config* cc = io->cc;
+    struct crypt_strategy* cs = io->cs;
     struct convert_context* ctx = &io->ctx;
     int crypt_finished;
     sector_t sector = io->sector;
@@ -809,7 +878,7 @@ static void kcryptd_crypt_write_continue(struct work_struct* work) {
     wait_for_completion(&ctx->restart);
     reinit_completion(&ctx->restart);
 
-    r = crypt_convert(cc, &io->ctx, true, false);
+    r = crypt_convert(cc, cs, &io->ctx, true, false);
     if (r)
         io->error = r;
     crypt_finished = atomic_dec_and_test(&ctx->cc_pending);
@@ -830,6 +899,7 @@ static void kcryptd_crypt_write_continue(struct work_struct* work) {
 
 static void kcryptd_crypt_write_convert(struct dm_crypt_io* io) {
     struct crypt_config* cc = io->cc;
+    struct crypt_strategy* cs = io->cs;
     struct convert_context* ctx = &io->ctx;
     struct bio* clone;
     int crypt_finished;
@@ -854,7 +924,7 @@ static void kcryptd_crypt_write_convert(struct dm_crypt_io* io) {
     sector += bio_sectors(clone);
 
     crypt_inc_pending(io);
-    r = crypt_convert(cc, ctx,
+    r = crypt_convert(cc, cs, ctx,
                       test_bit(DM_CRYPT_NO_WRITE_WORKQUEUE, &cc->flags), true);
     /*
      * Crypto API backlogged the request, because its queue was full
@@ -892,12 +962,13 @@ static void kcryptd_crypt_read_done(struct dm_crypt_io* io) {
 static void kcryptd_crypt_read_continue(struct work_struct* work) {
     struct dm_crypt_io* io = container_of(work, struct dm_crypt_io, work);
     struct crypt_config* cc = io->cc;
+    struct crypt_strategy* cs = io->cs;
     blk_status_t r;
 
     wait_for_completion(&io->ctx.restart);
     reinit_completion(&io->ctx.restart);
 
-    r = crypt_convert(cc, &io->ctx, true, false);
+    r = crypt_convert(cc, cs, &io->ctx, true, false);
     if (r)
         io->error = r;
 
@@ -909,13 +980,14 @@ static void kcryptd_crypt_read_continue(struct work_struct* work) {
 
 static void kcryptd_crypt_read_convert(struct dm_crypt_io* io) {
     struct crypt_config* cc = io->cc;
+    struct crypt_strategy* cs = io->cs;
     blk_status_t r;
 
     crypt_inc_pending(io);
 
     crypt_convert_init(cc, &io->ctx, io->base_bio, io->base_bio, io->sector);
 
-    r = crypt_convert(cc, &io->ctx,
+    r = crypt_convert(cc, cs, &io->ctx,
                       test_bit(DM_CRYPT_NO_READ_WORKQUEUE, &cc->flags), true);
     /*
      * Crypto API backlogged the request, because its queue was full
@@ -941,6 +1013,7 @@ static void kcryptd_async_done(struct crypto_async_request* async_req,
     struct convert_context* ctx = dmreq->ctx;
     struct dm_crypt_io* io = container_of(ctx, struct dm_crypt_io, ctx);
     struct crypt_config* cc = io->cc;
+    struct crypt_strategy* cs = io->cs;
 
     /*
      * A request from crypto driver backlog is going to be processed now,
@@ -952,15 +1025,15 @@ static void kcryptd_async_done(struct crypto_async_request* async_req,
         return;
     }
 
-    if (!error && cc->iv_gen_ops && cc->iv_gen_ops->post)
-        error = cc->iv_gen_ops->post(cc, org_iv_of_dmreq(cc, dmreq), dmreq);
+    if (!error && cs->iv_gen_ops && cs->iv_gen_ops->post)
+        error = cs->iv_gen_ops->post(cs, org_iv_of_dmreq(cs, dmreq), dmreq);
 
     if (error == -EBADMSG) {
         io->error = BLK_STS_PROTECTION;
     } else if (error < 0)
         io->error = BLK_STS_IOERR;
 
-    crypt_free_req(cc, req_of_dmreq(cc, dmreq), io->base_bio);
+    crypt_free_req(cs, req_of_dmreq(cs, dmreq), io->base_bio);
 
     if (!atomic_dec_and_test(&ctx->cc_pending))
         return;
@@ -1040,10 +1113,10 @@ static void crypt_free_tfms_skcipher(struct crypt_strategy* cs) {
 }
 
 static void crypt_free_tfms(struct crypt_strategies* cs) {
-    crypt_free_tfms_skcipher(cs->read_write_efficient);
-    crypt_free_tfms_skcipher(cs->write_most_efficient);
-    crypt_free_tfms_skcipher(cs->read_most_efficient);
-    crypt_free_tfms_skcipher(cs->default_strategy);
+    crypt_free_tfms_skcipher(&cs->read_write_efficient);
+    crypt_free_tfms_skcipher(&cs->write_most_efficient);
+    crypt_free_tfms_skcipher(&cs->read_most_efficient);
+    crypt_free_tfms_skcipher(&cs->default_strategy);
 }
 
 static int crypt_alloc_tfms_skcipher(struct crypt_strategy* cs,
@@ -1076,19 +1149,19 @@ static int crypt_alloc_tfms_skcipher(struct crypt_strategy* cs,
     return 0;
 }
 
-static unsigned crypt_subkey_size(struct crypt_config* cc) {
-    return (cc->key_size - cc->key_extra_size) >> ilog2(cc->tfms_count);
+static unsigned crypt_subkey_size(struct crypt_config* cc,
+                                  struct crypt_strategy* cs) {
+    return (cc->key_size - cc->key_extra_size) >> ilog2(cs->tfms_count);
 }
 
-static int crypt_setkey(struct crypt_config* cc) {
+static int crypt_setkey(struct crypt_config* cc, struct crypt_strategy* cs) {
     unsigned subkey_size;
     int err = 0, i, r;
 
     /* Ignore extra keys (which are used for IV etc) */
-    subkey_size = crypt_subkey_size(cc);
-
-    for (i = 0; i < cc->tfms_count; i++) {
-        r = crypto_skcipher_setkey(cc->cipher_tfm.tfms[i],
+    subkey_size = crypt_subkey_size(cc, cs);
+    for (i = 0; i < cs->tfms_count; i++) {
+        r = crypto_skcipher_setkey(cs->cipher_tfm[i],
                                    cc->key + (i * subkey_size), subkey_size);
         if (r)
             err = r;
@@ -1218,7 +1291,10 @@ static int crypt_set_keyring_key(struct crypt_config* cc,
      * key */
     clear_bit(DM_CRYPT_KEY_VALID, &cc->flags);
 
-    ret = crypt_setkey(cc);
+    ret = crypt_setkey(cc, &cc->crypt_strategies.read_write_efficient);
+    ret |= crypt_setkey(cc, &cc->crypt_strategies.read_most_efficient);
+    ret |= crypt_setkey(cc, &cc->crypt_strategies.write_most_efficient);
+    ret |= crypt_setkey(cc, &cc->crypt_strategies.default_strategy);
 
     if (!ret) {
         set_bit(DM_CRYPT_KEY_VALID, &cc->flags);
@@ -1292,7 +1368,10 @@ static int crypt_set_key(struct crypt_config* cc, char* key) {
     if (cc->key_size && hex2bin(cc->key, key, cc->key_size) < 0)
         goto out;
 
-    r = crypt_setkey(cc);
+    r = crypt_setkey(cc, &cc->crypt_strategies.read_write_efficient);
+    r |= crypt_setkey(cc, &cc->crypt_strategies.read_most_efficient);
+    r |= crypt_setkey(cc, &cc->crypt_strategies.write_most_efficient);
+    r |= crypt_setkey(cc, &cc->crypt_strategies.default_strategy);
     if (!r)
         set_bit(DM_CRYPT_KEY_VALID, &cc->flags);
 
@@ -1304,21 +1383,49 @@ out:
 }
 
 static int crypt_wipe_key(struct crypt_config* cc) {
+    struct crypt_strategies* cs = &cc->crypt_strategies;
+    struct crypt_strategy* strategy;
     int r;
 
     clear_bit(DM_CRYPT_KEY_VALID, &cc->flags);
     get_random_bytes(&cc->key, cc->key_size);
 
     /* Wipe IV private keys */
-    if (cc->iv_gen_ops && cc->iv_gen_ops->wipe) {
-        r = cc->iv_gen_ops->wipe(cc);
+
+    strategy = &cs->read_write_efficient;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->wipe) {
+        r = strategy->iv_gen_ops->wipe(strategy);
+        if (r)
+            return r;
+    }
+
+    strategy = &cs->read_most_efficient;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->wipe) {
+        r = strategy->iv_gen_ops->wipe(strategy);
+        if (r)
+            return r;
+    }
+
+    strategy = &cs->write_most_efficient;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->wipe) {
+        r = strategy->iv_gen_ops->wipe(strategy);
+        if (r)
+            return r;
+    }
+
+    strategy = &cs->default_strategy;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->wipe) {
+        r = strategy->iv_gen_ops->wipe(strategy);
         if (r)
             return r;
     }
 
     kfree_sensitive(cc->key_string);
     cc->key_string = NULL;
-    r = crypt_setkey(cc);
+    r = crypt_setkey(cc, &cs->read_write_efficient) |
+        crypt_setkey(cc, &cs->read_most_efficient) |
+        crypt_setkey(cc, &cs->write_most_efficient) |
+        crypt_setkey(cc, &cs->default_strategy);
     memset(&cc->key, 0, cc->key_size * sizeof(u8));
 
     return r;
@@ -1368,6 +1475,7 @@ static void crypt_page_free(void* page, void* pool_data) {
 static void crypt_dtr(struct dm_target* ti) {
     struct crypt_config* cc = ti->private;
     struct crypt_strategies* cs = &cc->crypt_strategies;
+    struct crypt_strategy* strategy;
 
     ti->private = NULL;
 
@@ -1387,25 +1495,26 @@ static void crypt_dtr(struct dm_target* ti) {
     bioset_exit(&cc->bs);
 
     mempool_exit(&cc->page_pool);
-    mempool_exit(cs->read_write_efficient.req_pool);
-    mempool_exit(cs->write_most_efficient.req_pool);
-    mempool_exit(cs->read_most_efficient.req_pool);
-    mempool_exit(cs->default_strategy.req_pool);
+    mempool_exit(&cs->read_write_efficient.req_pool);
+    mempool_exit(&cs->write_most_efficient.req_pool);
+    mempool_exit(&cs->read_most_efficient.req_pool);
+    mempool_exit(&cs->default_strategy.req_pool);
 
     WARN_ON(percpu_counter_sum(&cc->n_allocated_pages) != 0);
     percpu_counter_destroy(&cc->n_allocated_pages);
 
-    if (cs->read_write_efficient.iv_gen_ops &&
-        cs->read_write_efficient.iv_gen_ops->dtr)
-        cs->read_write_efficient.iv_gen_ops->dtr(cc);
-    if (cs->write_most_efficient.iv_gen_ops &&
-        cs->write_most_efficient.iv_gen_ops->dtr)
-        cs->write_most_efficient.iv_gen_ops->dtr(cc);
-    if (cs->read_most_efficient.iv_gen_ops &&
-        cs->read_most_efficient.iv_gen_ops->dtr)
-        cs->read_most_efficient.iv_gen_ops->dtr(cc);
-    if (cs->default_strategy.iv_gen_ops && cs->default_strategy.iv_gen_ops->dtr)
-        cs->default_strategy.iv_gen_ops->dtr(cc);
+    strategy = &cs->read_write_efficient;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->dtr)
+        strategy->iv_gen_ops->dtr(strategy);
+    strategy = &cs->read_most_efficient;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->dtr)
+        strategy->iv_gen_ops->dtr(strategy);
+    strategy = &cs->write_most_efficient;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->dtr)
+        strategy->iv_gen_ops->dtr(strategy);
+    strategy = &cs->default_strategy;
+    if (strategy->iv_gen_ops && strategy->iv_gen_ops->dtr)
+        strategy->iv_gen_ops->dtr(strategy);
 
     if (cc->dev)
         dm_put_device(ti, cc->dev);
@@ -1448,7 +1557,7 @@ static int crypt_ctr_ivmode(struct dm_target* ti) {
     if (cs->write_most_efficient.iv_size) {
         /* at least a 64 bit sector number should fit in our buffer */
         cs->write_most_efficient.iv_size =
-            max(cs->write_most_efficient.,
+            max(cs->write_most_efficient.iv_size,
                 (unsigned int)(sizeof(u64) / sizeof(u8)));
     }
     cs->write_most_efficient.iv_gen_ops = &crypt_iv_essiv_ops;
@@ -1460,8 +1569,9 @@ static int crypt_ctr_ivmode(struct dm_target* ti) {
         crypto_skcipher_ivsize(cs->read_most_efficient.cipher_tfm[0]);
     if (cs->read_most_efficient.iv_size) {
         /* at least a 64 bit sector number should fit in our buffer */
-        cs->read_most_efficient.iv_size = max(
-            cs->read_most_efficient., (unsigned int)(sizeof(u64) / sizeof(u8)));
+        cs->read_most_efficient.iv_size =
+            max(cs->read_most_efficient.iv_size,
+                (unsigned int)(sizeof(u64) / sizeof(u8)));
     }
     cs->read_most_efficient.iv_gen_ops = &crypt_iv_essiv_ops;
 
@@ -1565,7 +1675,7 @@ static int crypt_ctr_crypt_strategies(struct dm_target* ti, char* key) {
         return ret;
     }
     cs->read_write_efficient.iv_size =
-        crypto_skcipher_ivsize(cs->read_write_efficient.cipher_tfm);
+        crypto_skcipher_ivsize(any_tfm(&cs->read_write_efficient));
 
     /* 2. write most efficient crypt strategy for read-cold-write-hot region
      * chunks */
@@ -1579,7 +1689,7 @@ static int crypt_ctr_crypt_strategies(struct dm_target* ti, char* key) {
         return ret;
     }
     cs->write_most_efficient.iv_size =
-        crypto_skcipher_ivsize(cs->write_most_efficient.cipher_tfm);
+        crypto_skcipher_ivsize(any_tfm(&cs->write_most_efficient));
 
     /* 3. read most efficient crypt strategy for read-hot-write-cold region
      * chunks */
@@ -1593,7 +1703,7 @@ static int crypt_ctr_crypt_strategies(struct dm_target* ti, char* key) {
         return ret;
     }
     cs->read_most_efficient.iv_size =
-        crypto_skcipher_ivsize(cs->read_most_efficient.cipher_tfm);
+        crypto_skcipher_ivsize(any_tfm(&cs->read_most_efficient));
 
     /* 4. default crypt strategy for read-cold-write-cold region chunks */
     cs->default_strategy.tfms_count = 1;
@@ -1604,14 +1714,13 @@ static int crypt_ctr_crypt_strategies(struct dm_target* ti, char* key) {
         return ret;
     }
     cs->default_strategy.iv_size =
-        crypto_skcipher_ivsize(cs->default_strategy.cipher_tfm);
+        crypto_skcipher_ivsize(any_tfm(&cs->default_strategy));
 
     return 0;
 }
 
 static int crypt_ctr_cipher(struct dm_target* ti, char* key) {
     struct crypt_config* cc = ti->private;
-    struct crypt_strategies* cs = &cc->crypt_strategies;
     int ret;
 
     ret = crypt_ctr_crypt_strategies(ti, key);
@@ -1671,12 +1780,9 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
     struct crypt_config* cc;
     const char* devname = dm_table_device_name(ti->table);
     int key_size;
-    unsigned int align_mask;
     unsigned long long tmpll;
     int ret;
-    size_t iv_size_padding, additional_req_size;
     char dummy;
-    sector_t meta_start, meta_sectors, data_start, data_sectors;
 
     if (argc < 5) {
         ti->error = "Not enough arguments";
@@ -1813,9 +1919,26 @@ bad:
     return ret;
 }
 
+static struct crypt_strategy* crypt_select_strategy(struct crypt_config* cc,
+                                                    unsigned int region_type) {
+    switch (region_type) {
+        case REGION_READ_HOT_WRITE_HOT:
+            return &cc->crypt_strategies.read_write_efficient;
+        case REGION_READ_HOT_WRITE_COLD:
+            return &cc->crypt_strategies.read_most_efficient;
+        case REGION_READ_COLD_WRITE_HOT:
+            return &cc->crypt_strategies.write_most_efficient;
+        case REGION_READ_COLD_WRITE_COLD:
+            return &cc->crypt_strategies.default_strategy;
+    }
+    return NULL;
+}
+
 static int crypt_map(struct dm_target* ti, struct bio* bio) {
     struct dm_crypt_io* io;
     struct crypt_config* cc = ti->private;
+    struct crypt_strategy* cs;
+    unsigned int entry;
 
     /*
      * If bio is REQ_PREFLUSH or REQ_OP_DISCARD, just bypass crypt queues.
@@ -1829,6 +1952,11 @@ static int crypt_map(struct dm_target* ti, struct bio* bio) {
                 cc->start + dm_target_offset(ti, bio->bi_iter.bi_sector);
         return DM_MAPIO_REMAPPED;
     }
+
+    /**
+     * Check if bio is accross multiple region chunks, split as needed.
+     */
+    // TODO
 
     /*
      * Check if bio is too large, split as needed.
@@ -1849,8 +1977,13 @@ static int crypt_map(struct dm_target* ti, struct bio* bio) {
     if (unlikely(bio->bi_iter.bi_size & (cc->sector_size - 1)))
         return DM_MAPIO_KILL;
 
-    io = dm_per_bio_data(bio, cc->per_bio_data_size);
-    crypt_io_init(io, cc, bio, dm_target_offset(ti, bio->bi_iter.bi_sector));
+    /* Choose crypt strategy from Region Mapper by bio start sector */
+    entry = get_mapping_entry(cc->rmap->mapping_tbl, bio->bi_iter.bi_sector);
+    cs = crypt_select_strategy(cc, CURRENT_RDWR_TYPE(entry));
+
+    io = dm_per_bio_data(bio, cs->per_bio_data_size);
+    crypt_io_init(io, cc, cs, bio,
+                  dm_target_offset(ti, bio->bi_iter.bi_sector));
 
     io->ctx.req = (struct skcipher_request*)(io + 1);
 
@@ -1878,7 +2011,7 @@ static void crypt_status(struct dm_target* ti,
             break;
 
         case STATUSTYPE_TABLE:
-            DMEMIT("%s ", cc->cipher_string);
+            DMEMIT("%s ", "[minxed]");
 
             if (cc->key_size > 0) {
                 if (cc->key_string)
@@ -1940,8 +2073,6 @@ static void crypt_status(struct dm_target* ti,
 
             if (cc->sector_size != (1 << SECTOR_SHIFT))
                 DMEMIT(",sector_size=%d", cc->sector_size);
-            if (cc->cipher_string)
-                DMEMIT(",cipher_string=%s", cc->cipher_string);
 
             DMEMIT(",key_size=%u", cc->key_size);
             DMEMIT(",key_parts=%u", cc->key_parts);
@@ -1984,6 +2115,8 @@ static int crypt_message(struct dm_target* ti,
                          char* result,
                          unsigned maxlen) {
     struct crypt_config* cc = ti->private;
+    struct crypt_strategies* cs = &cc->crypt_strategies;
+    struct crypt_strategy* strategy;
     int key_size, ret = -EINVAL;
 
     if (argc < 2)
@@ -2005,8 +2138,23 @@ static int crypt_message(struct dm_target* ti,
             ret = crypt_set_key(cc, argv[2]);
             if (ret)
                 return ret;
-            if (cc->iv_gen_ops && cc->iv_gen_ops->init)
-                ret = cc->iv_gen_ops->init(cc);
+
+            strategy = &cs->read_write_efficient;
+            if (strategy->iv_gen_ops && strategy->iv_gen_ops->init)
+                strategy->iv_gen_ops->init(strategy);
+
+            strategy = &cs->read_most_efficient;
+            if (strategy->iv_gen_ops && strategy->iv_gen_ops->init)
+                strategy->iv_gen_ops->init(strategy);
+
+            strategy = &cs->write_most_efficient;
+            if (strategy->iv_gen_ops && strategy->iv_gen_ops->init)
+                strategy->iv_gen_ops->init(strategy);
+
+            strategy = &cs->default_strategy;
+            if (strategy->iv_gen_ops && strategy->iv_gen_ops->init)
+                strategy->iv_gen_ops->init(strategy);
+
             /* wipe the kernel key payload copy */
             if (cc->key_string)
                 memset(cc->key, 0, cc->key_size * sizeof(u8));
