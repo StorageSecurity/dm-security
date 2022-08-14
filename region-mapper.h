@@ -9,10 +9,9 @@
 #define REGION_READ_COLD_WRITE_HOT (0b01)
 #define REGION_READ_COLD_WRITE_COLD (0b00)
 
-#define CHUNK_SIZE (8 * 1024 * 1024)  // 8MB
-#define CHUNK_SHIFT (22)
+#define CHUNK_SHIFT (14)
+#define CHUNK_SIZE_IN_SECTORS (1 << CHUNK_SHIFT)  // 2^14 * 512B(sector) = 2^23B = 8MB
 #define SECTOR_TO_CHUNK(sectors) ((sectors) >> CHUNK_SHIFT)
-#define SECTORS_IN_CHUNK ((1 << CHUNK_SHIFT) >> SECTOR_SHIFT)
 
 #define REGION_TYPE_MASK (0x3)
 
@@ -80,10 +79,11 @@ void free_mapping_table(struct mapping_table* tbl);
 inline void use_physical_chunk(struct mapping_table* tbl, unsigned int pc);
 inline void free_physical_chunk(struct mapping_table* tbl, unsigned int pc);
 unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors);
-void set_mapping_entry(struct mapping_table* tbl,
+unsigned int set_mapping_entry(struct mapping_table* tbl,
                        unsigned int lc,
                        unsigned int entry);
 unsigned int find_free_physical_chunk(struct mapping_table* tbl);
+unsigned int alloc_free_physical_chunk(struct mapping_table* tbl, unsigned int lc);
 
 struct dev_sync_table* alloc_dev_sync_table(struct dev_id* dev);
 void free_dev_sync_table(struct dev_sync_table* tbl);

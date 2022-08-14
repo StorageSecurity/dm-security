@@ -132,8 +132,8 @@ static ssize_t region_mapper_read_proc(struct file* filp,
                                        size_t count,
                                        loff_t* offset) {
     ssize_t ret = 0;
-    unsigned** mapping_entry = pde_data(file_inode(filp));
-    unsigned rw_flags =
+    unsigned int** mapping_entry = pde_data(file_inode(filp));
+    unsigned int rw_flags =
         ((**mapping_entry) >> CURRENT_RDWR_SHIFT) & REGION_TYPE_MASK;
     char out[3];
     pr_info("region_mapper_read_proc\n");
@@ -210,15 +210,17 @@ struct mapping_table* alloc_mapping_table(sector_t sectors) {
         return NULL;
     }
 
-    tbl->entry_count = (sectors << SECTOR_SHIFT) >> CHUNK_SHIFT;
+    // MUST make sure that sectors aligned to CHUNK_SIZE_IN_SECTORS
+    tbl->entry_count = (sectors >> CHUNK_SHIFT);
 
-    tbl->mapping_page = vzalloc(tbl->entry_count << sizeof(unsigned int));
+    tbl->mapping_page = vzalloc(tbl->entry_count * sizeof(unsigned int));
     if (!tbl->mapping_page) {
         pr_err("region_mapper: failed to allocate mapping page\n");
         goto bad;
     }
 
-    tbl->bitmap = kzalloc(tbl->entry_count >> sizeof(unsigned int), GFP_KERNEL);
+    tbl->bitmap = kzalloc(
+        DIV_ROUND_UP(tbl->entry_count, (sizeof(unsigned int) * 8)), GFP_KERNEL);
     if (!tbl->bitmap) {
         pr_err("region_mapper: failed to allocate bitmap\n");
         goto bad;
@@ -252,12 +254,6 @@ void free_mapping_table(struct mapping_table* tbl) {
     }
 }
 EXPORT_SYMBOL(free_mapping_table);
-
-inline void use_physical_chunk(struct mapping_table* tbl, unsigned int pc) {
-    unsigned int i = pc / (sizeof(unsigned int) * 8);
-    unsigned int j = pc % (sizeof(unsigned int) * 8);
-    BITMAP_SET(tbl->bitmap[i], j);
-}
 
 inline void free_physical_chunk(struct mapping_table* tbl, unsigned int pc) {
     unsigned int i = pc / (sizeof(unsigned int) * 8);
@@ -375,6 +371,8 @@ EXPORT_SYMBOL(dev_destroy_region_mapper);
 unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors) {
     int logical_chunk = SECTOR_TO_CHUNK(sectors);
 
+    pr_info("get mapping entry for: %llu", sectors);
+
     if (logical_chunk >= tbl->entry_count) {
         pr_err("region_mapper: logical chunk '%d' out of range\n",
                logical_chunk);
@@ -382,22 +380,22 @@ unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors) {
     }
 
     if (!MAPPING_ENTRY_IN_USE(tbl->mapping_page[logical_chunk])) {
-        pr_err("region_mapper: invalid mapping entry\n");
         return 0;
     }
     return tbl->mapping_page[logical_chunk];
 }
 EXPORT_SYMBOL(get_mapping_entry);
 
-void set_mapping_entry(struct mapping_table* tbl,
-                       unsigned int lc,
-                       unsigned int target_chunk) {
+unsigned int set_mapping_entry(struct mapping_table* tbl,
+                               unsigned int lc,
+                               unsigned int target_chunk) {
     if (lc >= tbl->entry_count) {
         pr_err("region_mapper: logical chunk '%d' out of range\n", lc);
-        return;
+        return 0;
     }
     tbl->mapping_page[lc] =
         TARGET_CHUNK_SET(tbl->mapping_page[lc], target_chunk);
+    return tbl->mapping_page[lc];
 }
 EXPORT_SYMBOL(set_mapping_entry);
 
@@ -414,13 +412,30 @@ unsigned int find_free_physical_chunk(struct mapping_table* tbl) {
     // find out the exact not allocated bit in the bitmap line
     for (j = 0; j < sizeof(unsigned int) * 8; j++) {
         if (!(tbl->bitmap[i] & (1 << j))) {
-            tbl->bitmap[i] |= (1 << j);
+            BITMAP_SET(tbl->bitmap[i], j);
             return i * sizeof(unsigned int) * 8 + j;
         }
     }
     return -1;
 }
 EXPORT_SYMBOL(find_free_physical_chunk);
+
+unsigned int alloc_free_physical_chunk(struct mapping_table* tbl,
+                                       unsigned int lc) {
+    unsigned int physical_chunk;
+    unsigned int entry;
+
+    physical_chunk = find_free_physical_chunk(tbl);
+    if (physical_chunk == -1) {
+        pr_err("region_mapper: no free physical chunk\n");
+        return 0;
+    }
+
+    entry = set_mapping_entry(tbl, lc, physical_chunk);
+
+    return entry;
+}
+EXPORT_SYMBOL(alloc_free_physical_chunk);
 
 /* Internal definitions */
 
@@ -461,9 +476,9 @@ struct sync_table* alloc_sync_table(unsigned int lc,
     stbl->logical_chunk = lc;
     stbl->original_physical_chunk = opc;
     stbl->target_physical_chunk = tpc;
-    stbl->remain = SECTORS_IN_CHUNK;
+    stbl->remain = CHUNK_SIZE_IN_SECTORS;
     stbl->bitmap =
-        kzalloc(SECTORS_IN_CHUNK >> sizeof(unsigned int), GFP_KERNEL);
+        kzalloc(CHUNK_SIZE_IN_SECTORS >> sizeof(unsigned int), GFP_KERNEL);
     if (!stbl->bitmap) {
         pr_err("error allocate sync table bitmap\n");
         goto err;
@@ -550,8 +565,27 @@ struct sync_io* bio_region_map(struct dev_region_mapper* mapper,
     unsigned int expect_type;
     unsigned int current_type;
     struct mapping_table* tbl = mapper->mapping_tbl;
-    sector_t sectors = bio->bi_iter.bi_sector - mapper->data_start;
-    unsigned int entry = get_mapping_entry(tbl, sectors);
+    sector_t start = bio->bi_iter.bi_sector;
+    unsigned int entry = get_mapping_entry(tbl, start);
+
+    pr_info("bio_region_map entry:  %u\n", entry);
+
+    if (!entry) {
+        pr_info("region_mapper: no entry found\n");
+        if (bio_data_dir(bio) == WRITE) {
+            pr_info("region_mapper: alloc free physical chunk for WRITE bio\n");
+            entry = alloc_free_physical_chunk(tbl, SECTOR_TO_CHUNK(start));
+            if (!entry) {
+                pr_err("region_mapper: no free physical chunk\n");
+                return NULL;
+            }
+            pr_info(
+                "region_mapper: alloc free physical chunk for WRITE bio "
+                "done\n");
+        } else {
+            return __bio_region_map(mapper, bio, entry);
+        }
+    }
 
     if (entry) {
         expect_type = EXPECT_RDWR_TYPE(entry);
@@ -563,9 +597,6 @@ struct sync_io* bio_region_map(struct dev_region_mapper* mapper,
         }
     }
 
-    if (bio_data_dir(bio) == READ && !entry) {
-        return __bio_region_map(mapper, bio, entry);
-    }
     return bio_region_map_sync(mapper, bio, entry);
 }
 EXPORT_SYMBOL(bio_region_map);
@@ -573,24 +604,32 @@ EXPORT_SYMBOL(bio_region_map);
 inline struct sync_io* __bio_region_map(struct dev_region_mapper* mapper,
                                         struct bio* bio,
                                         unsigned int entry) {
-    bio->bi_iter.bi_sector =
-        TARGET_CHUNK(entry) * CHUNK_SIZE + mapper->data_start;
+    int logical_chunk = SECTOR_TO_CHUNK(bio->bi_iter.bi_sector);
+    sector_t offset =
+        bio->bi_iter.bi_sector - logical_chunk * CHUNK_SIZE_IN_SECTORS;
+    bio->bi_iter.bi_sector = TARGET_CHUNK(entry) * CHUNK_SIZE_IN_SECTORS +
+                             offset + mapper->data_start;
     return NULL;
 }
 
 struct sync_io* bio_region_map_sync(struct dev_region_mapper* mapper,
                                     struct bio* bio,
                                     unsigned int entry) {
-    int logical_chunk =
-        SECTOR_TO_CHUNK(bio->bi_iter.bi_sector - mapper->data_start);
+    int logical_chunk = SECTOR_TO_CHUNK(bio->bi_iter.bi_sector);
     struct sync_table* stbl;
     unsigned int original_physical_chunk;
     unsigned int target_physical_chunk;
     struct sync_io* sync_io = NULL;
 
     if (!check_chunk_in_sync(mapper->dev, logical_chunk)) {
+        unsigned int new_entry =
+            alloc_free_physical_chunk(mapper->mapping_tbl, logical_chunk);
+        if (!new_entry) {
+            pr_err("region_mapper: failed to alloc free physical chunk\n");
+            return NULL;
+        }
         original_physical_chunk = TARGET_CHUNK(entry);
-        target_physical_chunk = find_free_physical_chunk(mapper->mapping_tbl);
+        target_physical_chunk = TARGET_CHUNK(new_entry);
         stbl = alloc_sync_table(logical_chunk, original_physical_chunk,
                                 target_physical_chunk);
         if (!stbl) {
@@ -600,7 +639,6 @@ struct sync_io* bio_region_map_sync(struct dev_region_mapper* mapper,
         stbl->private = mapper->dev_sync_tbl;
         INIT_LIST_HEAD(&stbl->list);
         list_add(&stbl->list, &mapper->dev_sync_tbl->sync_table_head);
-        use_physical_chunk(mapper->mapping_tbl, target_physical_chunk);
     } else {
         stbl = get_sync_table(mapper->dev_sync_tbl, logical_chunk);
         original_physical_chunk = stbl->original_physical_chunk;
