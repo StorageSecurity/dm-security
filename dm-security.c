@@ -696,17 +696,12 @@ static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
     clone_init(io, clone);
     clone->bi_iter.bi_sector = cc->start + io->sector;
 
-    pr_info("%s: before bio region map\n", __func__);
-
     // map bio using regrion mapper
     sync_io = bio_region_map(cc->rmap, clone);
     if (sync_io != NULL) {
         // encrypt with new strategy then submit
         int ret;
         struct convert_context ctx;
-
-        pr_info("%s: sync_io not NULL, encrypt with new strategy then submit\n",
-                __func__);
 
         crypt_convert_init(cc, &ctx, sync_io->base_io, sync_io->base_io,
                            io->sector);
@@ -719,7 +714,6 @@ static int kcryptd_io_read(struct dm_crypt_io* io, gfp_t gfp) {
         }
         submit_bio_noacct(sync_io->base_io);
     }
-    pr_info("%s: sync_io is NULL, submit directly\n", __func__);
 
     submit_bio_noacct(clone);
     return 0;
@@ -1814,12 +1808,7 @@ static int crypt_map(struct dm_target* ti, struct bio* bio) {
         return DM_MAPIO_KILL;
 
     /* Choose crypt strategy from Region Mapper by bio start sector */
-    pr_info("%s: bio start sector %llu\n", __func__, bio->bi_iter.bi_sector);
-    pr_info("%s: bio size %d\n", __func__, bio->bi_iter.bi_size);
-    pr_info("%s: bio rw type %s\n", __func__,
-            bio_data_dir(bio) == WRITE ? "write" : "read");
     entry = get_mapping_entry(cc->rmap->mapping_tbl, bio->bi_iter.bi_sector);
-    pr_info("%s: current rdwr type %u\n", __func__, entry);
     cs = crypt_select_strategy(cc, CURRENT_RDWR_TYPE(entry));
 
     io = dm_per_bio_data(bio, cs->per_bio_data_size);

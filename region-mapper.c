@@ -119,12 +119,10 @@ static void __exit region_mapper_exit(void) {
 /* procfs*/
 
 static int region_mapper_open_proc(struct inode* inode, struct file* file) {
-    pr_info("region_mapper_open_proc\n");
     return 0;
 }
 
 static int region_mapper_release_proc(struct inode* inode, struct file* file) {
-    pr_info("region_mapper_release_proc\n");
     return 0;
 }
 
@@ -134,7 +132,6 @@ static ssize_t region_mapper_read_proc(struct file* filp,
                                        loff_t* offset) {
     unsigned int* mapping_entry = pde_data(file_inode(filp));
     char out[128];
-    pr_info("region_mapper_read_proc, mapping entry: 0x%04x\n", *mapping_entry);
 
     if (len) {
         len = 0;
@@ -168,8 +165,6 @@ static ssize_t region_mapper_write_proc(struct file* filp,
     unsigned int rw_flags = 0;
     unsigned int expect_type = EXPECT_RDWR_TYPE(*mapping_entry);
     unsigned int current_type = CURRENT_RDWR_TYPE(*mapping_entry);
-    pr_info("region_mapper_write_proc, mapping entry: 0x%04x\n",
-            *mapping_entry);
 
     if (expect_type != current_type) {
         pr_err(
@@ -251,16 +246,13 @@ EXPORT_SYMBOL(alloc_mapping_table);
 
 void free_mapping_table(struct mapping_table* tbl) {
     if (tbl && tbl->bitmap) {
-        pr_info("tbl->bitmap: %p", tbl->bitmap);
         kfree_sensitive(tbl->bitmap);
     }
 
     if (tbl && tbl->mapping_page) {
-        pr_info("tbl->mapping_page: %p", tbl->mapping_page);
         // vfree(tbl->mapping_page);
     }
 
-    pr_info("tbl: %p", tbl);
     if (tbl) {
         kfree_sensitive(tbl);
     }
@@ -382,8 +374,6 @@ EXPORT_SYMBOL(dev_destroy_region_mapper);
 
 unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors) {
     int logical_chunk = SECTOR_TO_CHUNK(sectors);
-
-    pr_info("get mapping entry for: %llu", sectors);
 
     if (logical_chunk >= tbl->entry_count) {
         pr_err("region_mapper: logical chunk '%d' out of range\n",
@@ -582,20 +572,13 @@ struct sync_io* bio_region_map(struct dev_region_mapper* mapper,
     sector_t start = bio->bi_iter.bi_sector;
     unsigned int entry = get_mapping_entry(tbl, start);
 
-    pr_info("bio_region_map entry:  %u\n", entry);
-
     if (!entry) {
-        pr_info("region_mapper: no entry found\n");
         if (bio_data_dir(bio) == WRITE) {
-            pr_info("region_mapper: alloc free physical chunk for WRITE bio\n");
             entry = alloc_free_physical_chunk(tbl, SECTOR_TO_CHUNK(start));
             if (!entry) {
                 pr_err("region_mapper: no free physical chunk\n");
                 return NULL;
             }
-            pr_info(
-                "region_mapper: alloc free physical chunk for WRITE bio "
-                "done\n");
         } else {
             return __bio_region_map(mapper, bio, entry);
         }
@@ -604,8 +587,6 @@ struct sync_io* bio_region_map(struct dev_region_mapper* mapper,
     if (entry) {
         expect_type = EXPECT_RDWR_TYPE(entry);
         current_type = CURRENT_RDWR_TYPE(entry);
-        pr_info("region_mapper: expect type %d, current type %d\n", expect_type,
-                current_type);
         if (expect_type == current_type) {
             return __bio_region_map(mapper, bio, entry);
         }
