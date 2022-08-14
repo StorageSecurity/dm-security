@@ -51,7 +51,6 @@ struct sync_table {
     unsigned int* bitmap;
     void* private;
 };
-
 struct dev_sync_table {
     struct list_head list;
     struct list_head sync_table_head;
@@ -62,6 +61,8 @@ LIST_HEAD(all_dev_sync_tables);
 
 #define PROC_REGION_MAPPER_DIR ("region-mapper")
 struct proc_dir_entry* proc_region_mapper;
+char etx_array[20] = "try_proc_array\n";
+static int len = 1;
 static int region_mapper_open_proc(struct inode* inode, struct file* file);
 static int region_mapper_release_proc(struct inode* inode, struct file* file);
 static ssize_t region_mapper_read_proc(struct file* filp,
@@ -131,65 +132,77 @@ static ssize_t region_mapper_read_proc(struct file* filp,
                                        char __user* buf,
                                        size_t count,
                                        loff_t* offset) {
-    ssize_t ret = 0;
-    unsigned int** mapping_entry = pde_data(file_inode(filp));
-    unsigned int rw_flags =
-        ((**mapping_entry) >> CURRENT_RDWR_SHIFT) & REGION_TYPE_MASK;
-    char out[3];
-    pr_info("region_mapper_read_proc\n");
+    unsigned int* mapping_entry = pde_data(file_inode(filp));
+    // unsigned int rw_flags =
+    //     ((*mapping_entry) >> CURRENT_RDWR_SHIFT) & REGION_TYPE_MASK;
+    char out[128];
+    pr_info("region_mapper_read_proc, mapping entry: 0x%04x\n", *mapping_entry);
 
-    if (*offset != 0) {
-        *offset = 0;
-        return ret;
+    if (len) {
+        len = 0;
+    } else {
+        len = 1;
+        return 0;
     }
-    ret = sprintf(out, "%d%d\n", REGION_READ_BIT(rw_flags),
-                  REGION_WRITE_BIT(rw_flags));
-    if (copy_to_user(buf, out, ret)) {
-        pr_err("copy_to_user failed\n");
-        return -EFAULT;
+
+    sprintf(out,
+            "expect: 0x%04x, current: 0x%04x, in_use: %d, physical_chunk: %d\n",
+            EXPECT_RDWR_TYPE(*mapping_entry), CURRENT_RDWR_TYPE(*mapping_entry),
+            MAPPING_ENTRY_IN_USE_STATE(*mapping_entry),
+            TARGET_CHUNK(*mapping_entry));
+    pr_info("%s", out);
+
+    if (copy_to_user(buf, out, strlen(out))) {
+        pr_err("copy_to_user failed: %ld\n", count);
+        return 0;
     }
-    return ret;
+
+    return count;
 }
 
 static ssize_t region_mapper_write_proc(struct file* filp,
                                         const char* buf,
                                         size_t count,
                                         loff_t* offset) {
-    unsigned int** mapping_entry = pde_data(file_inode(filp));
+    unsigned int* mapping_entry = pde_data(file_inode(filp));
     char in[3];
     unsigned int rw_flags = 0;
-    unsigned int expect_type = EXPECT_RDWR_TYPE(**mapping_entry);
-    unsigned int current_type = CURRENT_RDWR_TYPE(**mapping_entry);
-    pr_info("region_mapper_write_proc\n");
+    unsigned int expect_type = EXPECT_RDWR_TYPE(*mapping_entry);
+    unsigned int current_type = CURRENT_RDWR_TYPE(*mapping_entry);
+    pr_info("region_mapper_write_proc, mapping entry: 0x%04x\n",
+            *mapping_entry);
 
     if (expect_type != current_type) {
-        pr_err("chunk in sync, discard update: exp_type=%d, cur_type%d\n",
-               expect_type, current_type);
-        return 0;
+        pr_err(
+            "chunk in sync, discard update: exp_type=0x%04x, cur_type=0x%04x\n",
+            expect_type, current_type);
+        return count;
     }
 
     if (copy_from_user(in, buf, count)) {
         pr_err("copy_from_user failed\n");
         return -EFAULT;
     }
-    if (count != 2) {
+
+    if (count < 2) {
         pr_err("invalid input\n");
         return -EINVAL;
     }
+
     if (in[0] == '0' || in[0] == '1') {
-        rw_flags |= REGION_READ_BIT(in[0] - '0');
+        rw_flags |= ((in[0] - '0') << 1);
     } else {
         pr_err("invalid input\n");
         return -EINVAL;
     }
     if (in[1] == '0' || in[1] == '1') {
-        rw_flags |= REGION_WRITE_BIT(in[1] - '0');
+        rw_flags |= (in[1] - '0');
     } else {
         pr_err("invalid input\n");
         return -EINVAL;
     }
 
-    **mapping_entry = EXPECT_RDWR_CLEAR_THEN_SET(**mapping_entry, rw_flags);
+    EXPECT_RDWR_CLEAR_THEN_SET(*mapping_entry, rw_flags);
 
     return count;
 }
@@ -318,7 +331,7 @@ struct dev_region_mapper* dev_create_region_mapper(const char* name,
     for (i = 0; i < tbl->entry_count; i++) {
         sprintf(proc_chk, "%d", i);
         proc_create_data(proc_chk, 0777, entry, &proc_fops,
-                         &mapper->mapping_tbl[i]);
+                         &tbl->mapping_page[i]);
     }
 
     return mapper;
@@ -395,6 +408,8 @@ unsigned int set_mapping_entry(struct mapping_table* tbl,
     }
     tbl->mapping_page[lc] =
         TARGET_CHUNK_SET(tbl->mapping_page[lc], target_chunk);
+    MAPPING_ENTRY_SET_IN_USE(tbl->mapping_page[lc]);
+    
     return tbl->mapping_page[lc];
 }
 EXPORT_SYMBOL(set_mapping_entry);

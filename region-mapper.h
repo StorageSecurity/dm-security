@@ -10,7 +10,8 @@
 #define REGION_READ_COLD_WRITE_COLD (0b00)
 
 #define CHUNK_SHIFT (14)
-#define CHUNK_SIZE_IN_SECTORS (1 << CHUNK_SHIFT)  // 2^14 * 512B(sector) = 2^23B = 8MB
+#define CHUNK_SIZE_IN_SECTORS \
+    (1 << CHUNK_SHIFT)  // 2^14 * 512B(sector) = 2^23B = 8MB
 #define SECTOR_TO_CHUNK(sectors) ((sectors) >> CHUNK_SHIFT)
 
 #define REGION_TYPE_MASK (0x3)
@@ -25,13 +26,17 @@
 
 #define REGION_READ_BIT(mask) ((mask)&0x2)
 #define REGION_WRITE_BIT(mask) ((mask)&0x1)
-#define EXPECT_RDWR_CLEAR_THEN_SET(entry, type)               \
-    (((~(REGION_TYPE_MASK << EXPECT_RDWR_SHIFT)) & (entry)) | \
-     ((type) << EXPECT_RDWR_SHIFT))
+#define EXPECT_RDWR_CLEAR_THEN_SET(entry, type)                        \
+    (entry = (((~(REGION_TYPE_MASK << EXPECT_RDWR_SHIFT)) & (entry)) | \
+              ((type) << EXPECT_RDWR_SHIFT)))
 
 #define MAPPING_ENTRY_IN_USE_SHIFT (27)
 #define MAPPING_ENTRY_IN_USE(entry) \
     ((entry) & (1 << MAPPING_ENTRY_IN_USE_SHIFT))
+#define MAPPING_ENTRY_SET_IN_USE(entry) \
+    (entry |= (1 << MAPPING_ENTRY_IN_USE_SHIFT))
+#define MAPPING_ENTRY_IN_USE_STATE(entry) \
+    ((entry >> (MAPPING_ENTRY_IN_USE_SHIFT - 1)) & 1)
 
 #define TARGET_CHUNK_MASK (0x7FFFFFF)
 #define TARGET_CHUNK(entry) ((entry)&TARGET_CHUNK_MASK)
@@ -80,10 +85,11 @@ inline void use_physical_chunk(struct mapping_table* tbl, unsigned int pc);
 inline void free_physical_chunk(struct mapping_table* tbl, unsigned int pc);
 unsigned int get_mapping_entry(struct mapping_table* tbl, sector_t sectors);
 unsigned int set_mapping_entry(struct mapping_table* tbl,
-                       unsigned int lc,
-                       unsigned int entry);
+                               unsigned int lc,
+                               unsigned int entry);
 unsigned int find_free_physical_chunk(struct mapping_table* tbl);
-unsigned int alloc_free_physical_chunk(struct mapping_table* tbl, unsigned int lc);
+unsigned int alloc_free_physical_chunk(struct mapping_table* tbl,
+                                       unsigned int lc);
 
 struct dev_sync_table* alloc_dev_sync_table(struct dev_id* dev);
 void free_dev_sync_table(struct dev_sync_table* tbl);
