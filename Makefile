@@ -22,3 +22,9 @@ uninstall:
 	rmmod region_mapper
 gdb:
 	@cat /sys/module/dm_security/sections/.text
+test: install
+	dd if=/dev/zero of=/dev/mapper/security1 bs=512 count=1
+	cat /proc/region-mapper/252:32/0
+	echo "11" > /proc/region-mapper/252:32/0
+	cat /proc/region-mapper/252:32/0
+	dd if=/dev/mapper/security1 of=security1.txt bs=512 count=1

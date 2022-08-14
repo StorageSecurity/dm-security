@@ -15,7 +15,7 @@
 #include <linux/vmalloc.h>
 
 #define SYNC_POOL_SIZE 64
-#define SYNC_BIO_POOL_SIZE 2
+#define SYNC_BIO_POOL_SIZE 16
 
 static struct bio_set sync_bio_set;
 static mempool_t sync_page_pool;
@@ -101,7 +101,7 @@ static int __init region_mapper_init(void) {
 
     ret = bioset_init(&sync_bio_set, SYNC_BIO_POOL_SIZE, 0, 0);
     BUG_ON(ret);
-    pr_info("sync bio pool size: %d pages\n", SYNC_BIO_POOL_SIZE);
+    pr_info("sync bio pool size: %d\n", SYNC_BIO_POOL_SIZE);
 
     proc_region_mapper = proc_mkdir(PROC_REGION_MAPPER_DIR, NULL);
     if (proc_region_mapper == NULL) {
@@ -671,7 +671,7 @@ struct bio* spawn_sync_bio(struct sync_table* stbl,
     struct bio_vec* to;
 
     if (bio_data_dir(bio) == READ) {
-        sync_bio = bio_alloc_bioset(GFP_NOIO, bio_segments(bio), &sync_bio_set);
+        sync_bio = bio_alloc_bioset(gfp_mask, bio_segments(bio), &sync_bio_set);
     } else {
         sync_bio = bio_clone_fast(bio, gfp_mask, &sync_bio_set);
     }
