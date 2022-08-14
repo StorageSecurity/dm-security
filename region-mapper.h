@@ -36,7 +36,7 @@
 #define MAPPING_ENTRY_SET_IN_USE(entry) \
     (entry |= (1 << MAPPING_ENTRY_IN_USE_SHIFT))
 #define MAPPING_ENTRY_IN_USE_STATE(entry) \
-    ((entry >> (MAPPING_ENTRY_IN_USE_SHIFT - 1)) & 1)
+    ((entry >> (MAPPING_ENTRY_IN_USE_SHIFT)) & 1)
 
 #define TARGET_CHUNK_MASK (0x7FFFFFF)
 #define TARGET_CHUNK(entry) ((entry)&TARGET_CHUNK_MASK)

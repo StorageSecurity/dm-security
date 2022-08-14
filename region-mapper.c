@@ -133,8 +133,6 @@ static ssize_t region_mapper_read_proc(struct file* filp,
                                        size_t count,
                                        loff_t* offset) {
     unsigned int* mapping_entry = pde_data(file_inode(filp));
-    // unsigned int rw_flags =
-    //     ((*mapping_entry) >> CURRENT_RDWR_SHIFT) & REGION_TYPE_MASK;
     char out[128];
     pr_info("region_mapper_read_proc, mapping entry: 0x%04x\n", *mapping_entry);
 
@@ -145,12 +143,13 @@ static ssize_t region_mapper_read_proc(struct file* filp,
         return 0;
     }
 
-    sprintf(out,
-            "expect: 0x%04x, current: 0x%04x, in_use: %d, physical_chunk: %d\n",
-            EXPECT_RDWR_TYPE(*mapping_entry), CURRENT_RDWR_TYPE(*mapping_entry),
-            MAPPING_ENTRY_IN_USE_STATE(*mapping_entry),
-            TARGET_CHUNK(*mapping_entry));
-    pr_info("%s", out);
+    sprintf(
+        out,
+        "[expect]          0x%04x\n[current]         0x%04x\n[in_use]         "
+        " %d\n[physical_chunk]  %d\n",
+        EXPECT_RDWR_TYPE(*mapping_entry), CURRENT_RDWR_TYPE(*mapping_entry),
+        MAPPING_ENTRY_IN_USE_STATE(*mapping_entry),
+        TARGET_CHUNK(*mapping_entry));
 
     if (copy_to_user(buf, out, strlen(out))) {
         pr_err("copy_to_user failed: %ld\n", count);
@@ -409,7 +408,7 @@ unsigned int set_mapping_entry(struct mapping_table* tbl,
     tbl->mapping_page[lc] =
         TARGET_CHUNK_SET(tbl->mapping_page[lc], target_chunk);
     MAPPING_ENTRY_SET_IN_USE(tbl->mapping_page[lc]);
-    
+
     return tbl->mapping_page[lc];
 }
 EXPORT_SYMBOL(set_mapping_entry);
