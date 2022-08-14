@@ -52,6 +52,8 @@ extern struct dev_region_mapper* dev_create_region_mapper(
     sector_t data_start,
     sector_t data_sectors);
 
+extern void dev_destroy_region_mapper(struct dev_region_mapper* mapper);
+
 /*
  * context holding the current state of a multi-part conversion
  */
@@ -195,8 +197,7 @@ struct crypt_config {
 
     unsigned long flags;
     unsigned int key_size;
-    unsigned int key_parts;      /* independent parts in key buffer */
-    unsigned int key_extra_size; /* additional keys length */
+    unsigned int key_parts; /* independent parts in key buffer */
 
     /*
      * pool for per bio private data, crypto requests,
@@ -1151,7 +1152,7 @@ static int crypt_alloc_tfms_skcipher(struct crypt_strategy* cs,
 
 static unsigned crypt_subkey_size(struct crypt_config* cc,
                                   struct crypt_strategy* cs) {
-    return (cc->key_size - cc->key_extra_size) >> ilog2(cs->tfms_count);
+    return (cc->key_size) >> ilog2(cs->tfms_count);
 }
 
 static int crypt_setkey(struct crypt_config* cc, struct crypt_strategy* cs) {
@@ -1170,176 +1171,9 @@ static int crypt_setkey(struct crypt_config* cc, struct crypt_strategy* cs) {
     return err;
 }
 
-#ifdef CONFIG_KEYS
-
-static bool contains_whitespace(const char* str) {
-    while (*str)
-        if (isspace(*str++))
-            return true;
-    return false;
-}
-
-static int set_key_user(struct crypt_config* cc, struct key* key) {
-    const struct user_key_payload* ukp;
-
-    ukp = user_key_payload_locked(key);
-    if (!ukp)
-        return -EKEYREVOKED;
-
-    if (cc->key_size != ukp->datalen)
-        return -EINVAL;
-
-    memcpy(cc->key, ukp->data, cc->key_size);
-
-    return 0;
-}
-
-static int set_key_encrypted(struct crypt_config* cc, struct key* key) {
-    const struct encrypted_key_payload* ekp;
-
-    ekp = key->payload.data[0];
-    if (!ekp)
-        return -EKEYREVOKED;
-
-    if (cc->key_size != ekp->decrypted_datalen)
-        return -EINVAL;
-
-    memcpy(cc->key, ekp->decrypted_data, cc->key_size);
-
-    return 0;
-}
-
-static int set_key_trusted(struct crypt_config* cc, struct key* key) {
-    const struct trusted_key_payload* tkp;
-
-    tkp = key->payload.data[0];
-    if (!tkp)
-        return -EKEYREVOKED;
-
-    if (cc->key_size != tkp->key_len)
-        return -EINVAL;
-
-    memcpy(cc->key, tkp->key, cc->key_size);
-
-    return 0;
-}
-
-static int crypt_set_keyring_key(struct crypt_config* cc,
-                                 const char* key_string) {
-    char *new_key_string, *key_desc;
-    int ret;
-    struct key_type* type;
-    struct key* key;
-    int (*set_key)(struct crypt_config * cc, struct key * key);
-
-    /*
-     * Reject key_string with whitespace. dm core currently lacks code for
-     * proper whitespace escaping in arguments on DM_TABLE_STATUS path.
-     */
-    if (contains_whitespace(key_string)) {
-        DMERR("whitespace chars not allowed in key string");
-        return -EINVAL;
-    }
-
-    /* look for next ':' separating key_type from key_description */
-    key_desc = strpbrk(key_string, ":");
-    if (!key_desc || key_desc == key_string || !strlen(key_desc + 1))
-        return -EINVAL;
-
-    if (!strncmp(key_string, "logon:", key_desc - key_string + 1)) {
-        type = &key_type_logon;
-        set_key = set_key_user;
-    } else if (!strncmp(key_string, "user:", key_desc - key_string + 1)) {
-        type = &key_type_user;
-        set_key = set_key_user;
-    } else if (IS_ENABLED(CONFIG_ENCRYPTED_KEYS) &&
-               !strncmp(key_string, "encrypted:", key_desc - key_string + 1)) {
-        type = &key_type_encrypted;
-        set_key = set_key_encrypted;
-    } else if (IS_ENABLED(CONFIG_TRUSTED_KEYS) &&
-               !strncmp(key_string, "trusted:", key_desc - key_string + 1)) {
-        type = &key_type_trusted;
-        set_key = set_key_trusted;
-    } else {
-        return -EINVAL;
-    }
-
-    new_key_string = kstrdup(key_string, GFP_KERNEL);
-    if (!new_key_string)
-        return -ENOMEM;
-
-    key = request_key(type, key_desc + 1, NULL);
-    if (IS_ERR(key)) {
-        kfree_sensitive(new_key_string);
-        return PTR_ERR(key);
-    }
-
-    down_read(&key->sem);
-
-    ret = set_key(cc, key);
-    if (ret < 0) {
-        up_read(&key->sem);
-        key_put(key);
-        kfree_sensitive(new_key_string);
-        return ret;
-    }
-
-    up_read(&key->sem);
-    key_put(key);
-
-    /* clear the flag since following operations may invalidate previously valid
-     * key */
-    clear_bit(DM_CRYPT_KEY_VALID, &cc->flags);
-
-    ret = crypt_setkey(cc, &cc->crypt_strategies.read_write_efficient);
-    ret |= crypt_setkey(cc, &cc->crypt_strategies.read_most_efficient);
-    ret |= crypt_setkey(cc, &cc->crypt_strategies.write_most_efficient);
-    ret |= crypt_setkey(cc, &cc->crypt_strategies.default_strategy);
-
-    if (!ret) {
-        set_bit(DM_CRYPT_KEY_VALID, &cc->flags);
-        kfree_sensitive(cc->key_string);
-        cc->key_string = new_key_string;
-    } else
-        kfree_sensitive(new_key_string);
-
-    return ret;
-}
-
 static int get_key_size(char** key_string) {
-    char *colon, dummy;
-    int ret;
-
-    if (*key_string[0] != ':')
-        return strlen(*key_string) >> 1;
-
-    /* look for next ':' in key string */
-    colon = strpbrk(*key_string + 1, ":");
-    if (!colon)
-        return -EINVAL;
-
-    if (sscanf(*key_string + 1, "%u%c", &ret, &dummy) != 2 || dummy != ':')
-        return -EINVAL;
-
-    *key_string = colon;
-
-    /* remaining key string should be :<logon|user>:<key_desc> */
-
-    return ret;
+    return strlen(*key_string) >> 1;
 }
-
-#else
-
-static int crypt_set_keyring_key(struct crypt_config* cc,
-                                 const char* key_string) {
-    return -EINVAL;
-}
-
-static int get_key_size(char** key_string) {
-    return (*key_string[0] == ':') ? -EINVAL : strlen(*key_string) >> 1;
-}
-
-#endif /* CONFIG_KEYS */
 
 static int crypt_set_key(struct crypt_config* cc, char* key) {
     int r = -EINVAL;
@@ -1348,13 +1182,6 @@ static int crypt_set_key(struct crypt_config* cc, char* key) {
     /* Hyphen (which gives a key_size of zero) means there is no key. */
     if (!cc->key_size && strcmp(key, "-"))
         goto out;
-
-    /* ':' means the key is in kernel keyring, short-circuit normal key
-     * processing */
-    if (key[0] == ':') {
-        r = crypt_set_keyring_key(cc, key + 1);
-        goto out;
-    }
 
     /* clear the flag since following operations may invalidate previously valid
      * key */
@@ -1531,7 +1358,10 @@ static void crypt_dtr(struct dm_target* ti) {
     dev_destroy_region_mapper(cc->rmap);
 
     /* Must zero key material before freeing */
-    kfree_sensitive(cc);
+
+    // FIXME: memory leaks, but code below will cause kernel panic, how to fix?
+    // kfree_sensitive(cc)；
+    kfree(cc);
 
     spin_lock(&dm_crypt_clients_lock);
     WARN_ON(!dm_crypt_clients_n);
@@ -1815,7 +1645,6 @@ static int crypt_ctr(struct dm_target* ti, unsigned int argc, char** argv) {
     if (ret < 0)
         goto bad;
 
-    /* Optional parameters need to be read before cipher constructor */
     /* WARN: we remove optional args in dm-security */
 
     /* Set up built-in cipher strategies */
@@ -2076,7 +1905,6 @@ static void crypt_status(struct dm_target* ti,
 
             DMEMIT(",key_size=%u", cc->key_size);
             DMEMIT(",key_parts=%u", cc->key_parts);
-            DMEMIT(",key_extra_size=%u", cc->key_extra_size);
             DMEMIT(";");
             break;
     }

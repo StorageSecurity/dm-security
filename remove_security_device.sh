@@ -1,4 +1,4 @@
 #!/bin/sh
 
-umount mnt
+# umount mnt
 dmsetup remove security1
