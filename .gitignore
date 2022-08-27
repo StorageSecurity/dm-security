@@ -1,1 +1,4 @@
 .vscode
+datasets
+*.csv
+download_trace*

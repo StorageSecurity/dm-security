@@ -1,0 +1,31 @@
+
+{
+  "verbose": true,
+  "stream": true,
+  "input": {
+    "puller": {
+      "model": "HWPCReport",
+      "type": "socket",
+      "uri": "127.0.0.1",
+      "port": 8080,
+      "collection": "test_hwpc"
+    }
+  },
+  "output": {
+    "pusher_power": {
+      "type": "influxdb",
+      "model": "PowerReport",
+      "uri": "127.0.0.1",
+      "port": 8086,
+      "db": "test",
+      "collection": "prep"
+    }
+  },
+  "cpu-frequency-base": 2400,
+  "cpu-frequency-min": 1200,
+  "cpu-frequency-max": 3200,
+  "cpu-error-threshold": 2.0,
+  "disable-dram-formula": true,
+  "sensor-report-sampling-interval": 1000
+}
+
