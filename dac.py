@@ -1,37 +1,4 @@
-import csv
-from rich.progress import Progress
-
-
-class IOTrace:
-
-    def __init__(self, row):
-        self.type = int(row[0])
-        self.offset = int(row[1])
-        self.size = int(row[2])
-
-
-class IOTraceSet:
-
-    def __init__(self, trace_file: str) -> None:
-        with open(trace_file, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            self.trace_set = [IOTrace(row) for row in reader]
-        print("trace num: %d" % len(self.trace_set))
-        self.cost = 0
-        self.total_cost = 0
-
-    def replay(self, trace_one):
-        with Progress() as progress:
-            task = progress.add_task('tracing...', total=len(self.trace_set))
-            for trace in self.trace_set:
-                self.cost, self.total_cost = trace_one(
-                    trace, self.cost, self.total_cost)
-                progress.update(task, advance=1)
-
-    def show_result(self):
-        print("total cost: %d" % self.total_cost)
-        print("actual cost: %d" % self.total_cost)
-        print("saved ratio: %.2f" % (1 - self.cost / self.total_cost))
+from io_trace_set import *
 
 
 class Region:
@@ -114,15 +81,16 @@ class DynamicDataClusteringModel:
         self.read_dac = DynamicDataClustering(read_regions)
         self.write_dac = DynamicDataClustering(write_regions)
 
-    def trace_one(self, trace: IOTrace, cost: int, total_cost: int) -> list:
-        cost += self.op_cost(trace)
-        total_cost += 3
+    def trace_one(self, trace: IOTrace) -> list:
+        cost = self.op_cost(trace)
+        total_cost = 3
         if trace.type == 0:
-            for i in range(trace.size):
+            for _ in range(trace.size):
                 self.read_dac.fit(trace.offset)
         else:
-            for i in range(trace.size):
+            for _ in range(trace.size):
                 self.write_dac.fit(trace.offset)
+        return cost, total_cost
 
     def op_cost(self, trace: IOTrace) -> int:
         read_hot = self.read_dac.predict(
@@ -149,7 +117,7 @@ class DynamicDataClusteringModel:
 
 if __name__ == '__main__':
     trace_set = IOTraceSet('proj_1_processed.csv')
-    dac_model = DynamicDataClusteringModel([100000, 100000, 100000, 100000], [
-                                           100000, 100000, 100000, 100000])
+    dac_model = DynamicDataClusteringModel([100000, 100000, 100000, 100000],
+                                           [100000, 100000, 100000, 100000])
     trace_set.replay(dac_model.trace_one)
     trace_set.show_result()

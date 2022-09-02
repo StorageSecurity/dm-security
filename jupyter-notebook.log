@@ -1,0 +1,51 @@
+nohup: 忽略输入
+[W 07:45:46.665 NotebookApp] WARNING: The notebook server is listening on all IP addresses and not using encryption. This is not recommended.
+[I 07:45:46.682 NotebookApp] [jupyter_nbextensions_configurator] enabled 0.4.1
+[I 07:45:46.683 NotebookApp] notebooks 运行所在的本地路径: /root/workspace/dm-security
+[I 07:45:46.683 NotebookApp] Jupyter Notebook 6.4.12 is running at:
+[I 07:45:46.683 NotebookApp] http://secstordev:8888/?token=417998e109426700b7367fc894f2a849f511b21b085ee486
+[I 07:45:46.683 NotebookApp]  or http://127.0.0.1:8888/?token=417998e109426700b7367fc894f2a849f511b21b085ee486
+[I 07:45:46.684 NotebookApp] 使用 Control-C 停止此服务器并关闭所有内核（连续操作两次便可跳过确认界面）。
+[W 07:45:46.687 NotebookApp] 没有找到网页浏览器: could not locate runnable browser。
+[C 07:45:46.687 NotebookApp] 
+    
+    To access the notebook, open this file in a browser:
+        file:///root/.local/share/jupyter/runtime/nbserver-19556-open.html
+    Or copy and paste one of these URLs:
+        http://secstordev:8888/?token=417998e109426700b7367fc894f2a849f511b21b085ee486
+     or http://127.0.0.1:8888/?token=417998e109426700b7367fc894f2a849f511b21b085ee486
+[W 07:46:02.225 NotebookApp] Clearing invalid/expired login cookie username-172-16-0-121-8888
+[W 07:46:02.226 NotebookApp] Forbidden
+[W 07:46:02.227 NotebookApp] 403 GET /api/terminals?_=1662119103262 (172.16.2.14) 3.120000ms referer=http://172.16.0.121:8888/tree
+[W 07:46:02.565 NotebookApp] Clearing invalid/expired login cookie username-172-16-0-121-8888
+[W 07:46:02.566 NotebookApp] Forbidden
+[W 07:46:02.567 NotebookApp] 403 GET /api/sessions?_=1662119103261 (172.16.2.14) 2.550000ms referer=http://172.16.0.121:8888/tree
+[I 07:46:10.673 NotebookApp] 302 GET /?token=417998e109426700b7367fc894f2a849f511b21b085ee486 (172.16.2.14) 1.090000ms
+Unable to load extension: pydevd_plugins.extensions.types.pydevd_plugin_pandas_types
+[W 07:46:14.892 NotebookApp] Config option `template_path` not recognized by `ExporterCollapsibleHeadings`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:14.903 NotebookApp] Config option `template_path` not recognized by `ExporterCollapsibleHeadings`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:14.945 NotebookApp] Config option `template_path` not recognized by `TocExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:14.953 NotebookApp] Config option `template_path` not recognized by `TocExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:14.973 NotebookApp] Config option `template_path` not recognized by `LenvsHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:14.986 NotebookApp] Config option `template_path` not recognized by `LenvsHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.008 NotebookApp] Config option `template_path` not recognized by `LenvsTocHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.021 NotebookApp] Config option `template_path` not recognized by `LenvsTocHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.063 NotebookApp] Config option `template_path` not recognized by `LenvsLatexExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.070 NotebookApp] Config option `template_path` not recognized by `LenvsLatexExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.241 NotebookApp] Config option `template_path` not recognized by `LenvsSlidesExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.249 NotebookApp] Config option `template_path` not recognized by `LenvsSlidesExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.337 NotebookApp] Config option `template_path` not recognized by `ExporterCollapsibleHeadings`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.345 NotebookApp] Config option `template_path` not recognized by `ExporterCollapsibleHeadings`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.377 NotebookApp] Config option `template_path` not recognized by `TocExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.383 NotebookApp] Config option `template_path` not recognized by `TocExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.395 NotebookApp] Config option `template_path` not recognized by `LenvsHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.405 NotebookApp] Config option `template_path` not recognized by `LenvsHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.421 NotebookApp] Config option `template_path` not recognized by `LenvsTocHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.431 NotebookApp] Config option `template_path` not recognized by `LenvsTocHTMLExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.462 NotebookApp] Config option `template_path` not recognized by `LenvsLatexExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.467 NotebookApp] Config option `template_path` not recognized by `LenvsLatexExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.600 NotebookApp] Config option `template_path` not recognized by `LenvsSlidesExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[W 07:46:15.606 NotebookApp] Config option `template_path` not recognized by `LenvsSlidesExporter`.  Did you mean one of: `extra_template_paths, template_name, template_paths`?
+[I 07:46:16.795 NotebookApp] Kernel started: 4b927e80-3962-442a-a46f-cf8bafabea88, name: python3
+Unable to load extension: pydevd_plugins.extensions.types.pydevd_plugin_pandas_types
+[IPKernelApp] WARNING | Parent appears to have exited, shutting down.

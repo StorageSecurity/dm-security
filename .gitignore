@@ -1,4 +1,7 @@
 .vscode
+.idea
+.ipynb_checkpoints
 datasets
 *.csv
 download_trace*
+__pycache__
