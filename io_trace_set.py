@@ -10,7 +10,7 @@ class IOTrace:
         self.size = int(row[2])
         
 
-class OriginalCost: 
+class Cost: 
     
     def __init__(self, read_cost, write_cost):
         self.cost_table = [read_cost, write_cost]
@@ -19,14 +19,14 @@ class OriginalCost:
         return self.cost_table[trace.type]
     
 
-original_cost_opt_for_read = OriginalCost(1, 3)
-original_cost_opt_for_write = OriginalCost(3, 1)
-original_cost_balanced = OriginalCost(2, 2)
+cost_opt_for_read = Cost(18, 103)
+cost_opt_for_write = Cost(103, 18)
+cost_balanced = Cost(22, 22)
 
 
 class IOTraceSet:
 
-    def __init__(self, trace_file: str, original_cost: OriginalCost) -> None:
+    def __init__(self, trace_file: str, original_cost: Cost) -> None:
         with open(trace_file, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             self.trace_set = [IOTrace(row) for row in reader]

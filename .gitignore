@@ -5,3 +5,4 @@ datasets
 *.csv
 download_trace*
 __pycache__
+results
