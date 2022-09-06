@@ -26,7 +26,7 @@ cost_balanced = Cost(22, 22)
 
 class IOTraceSet:
 
-    def __init__(self, trace_file: str, original_cost: Cost) -> None:
+    def __init__(self, trace_file: str) -> None:
         with open(trace_file, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             self.trace_set = [IOTrace(row) for row in reader]
@@ -34,8 +34,13 @@ class IOTraceSet:
         self.cost = 0
         self.total_cost = 0
         self.trace_file = trace_file
+
+    def set_original_cost(self, original_cost: Cost) -> None:
         self.original_cost = original_cost
-        
+
+    def clean_up(self) -> None:
+        self.cost = 0
+        self.total_cost = 0
 
     def replay(self, trace_one):
         with Progress() as progress:
